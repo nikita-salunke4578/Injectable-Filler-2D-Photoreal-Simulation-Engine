@@ -8,9 +8,8 @@ import type {
 
 export const WIZARD_STEPS: StepDefinition[] = [
   { id: 'photo', label: 'Photo', order: 1 },
-  { id: 'assessment', label: 'Assessment', order: 2 },
-  { id: 'configure', label: 'Configure', order: 3 },
-  { id: 'preview', label: 'Preview', order: 4 },
+  { id: 'configure', label: 'Configure', order: 2 },
+  { id: 'preview', label: 'Preview', order: 3 },
 ]
 
 export const ZONES: ZoneMeta[] = [

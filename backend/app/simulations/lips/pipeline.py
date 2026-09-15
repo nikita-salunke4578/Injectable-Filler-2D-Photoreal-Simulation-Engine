@@ -1,123 +1,81 @@
-"""
-Lips simulation pipeline.
+import numpy as np
 
-Owner: Jayam
+from app.common.face_detection import FaceDetector
+from app.simulations.lips.landmarks import extract_lip_landmarks
+from app.simulations.lips.mask import build_lip_mask
+from app.simulations.lips.deformation import apply_lip_deformation
+from app.simulations.lips.refinement import refine_lip_region
 
-Orchestrates the end-to-end lips simulation by calling each stage in
-sequence:
-
-    MediaPipe Landmarks
-            ↓
-        Lip ROI
-            ↓
-        Lip Mask
-            ↓
-    TPS Deformation
-            ↓
-  Masked AI Refinement
-            ↓
- Poisson / Seamless Blending
-            ↓
-       Validation
-            ↓
-      Final Result
-
-The pipeline receives a decoded image and configuration parameters,
-and returns the simulated result image.
-
-Usage:
-    from app.simulations.lips.pipeline import run_lips_simulation
-
-    result = await run_lips_simulation(image, config)
-"""
-
-from __future__ import annotations
-
-import logging
-from dataclasses import dataclass
-from typing import TYPE_CHECKING
-
-if TYPE_CHECKING:
-    import numpy as np  # type: ignore[import-untyped]
-
-logger = logging.getLogger(__name__)
-
-
-@dataclass
-class LipsSimulationConfig:
-    """Configuration for a single lips simulation run.
-
-    Attributes:
-        volume_ml: Requested volume parameter (0 – 2.0 mL range).
-        intensity: Normalised intensity (0.0 – 1.0).
-        enhancement_level: 'subtle' | 'natural' | 'full'.
-        upper_lower_balance: -100 (upper-weighted) to 100 (lower-weighted).
+def run_lips_pipeline(
+    image: np.ndarray,
+    volume_ml: float,
+    intensity: float,
+    upper_lower_balance: float = 0.0,
+    face_detector: FaceDetector = None
+) -> np.ndarray:
     """
-
-    volume_ml: float = 0.0
-    intensity: float = 0.0
-    enhancement_level: str = "natural"
-    upper_lower_balance: int = 0
-
-
-@dataclass
-class LipsSimulationResult:
-    """Output of the lips simulation pipeline.
-
-    Attributes:
-        image: The simulated result image (HxWx3 uint8).
-        success: Whether the pipeline completed without error.
-        message: Human-readable status message.
-    """
-
-    image: "np.ndarray | None" = None
-    success: bool = False
-    message: str = "Not yet implemented."
-
-
-async def run_lips_simulation(
-    image: "np.ndarray",
-    config: LipsSimulationConfig,
-) -> LipsSimulationResult:
-    """Execute the full lips simulation pipeline.
-
-    This is the main entry point called by ``SimulationService`` when
-    the requested zone is ``lips``.
-
-    Steps:
-        1. Extract lip landmarks from the face mesh.
-        2. Build the lip treatment region mask.
-        3. Apply controlled TPS deformation.
-        4. Run masked AI refinement.
-        5. Blend the result back into the original image.
-        6. Validate identity preservation and leakage.
-
+    Executes the complete Lips simulation pipeline.
+    
+    Stages:
+    1. Face Detection & Landmark Extraction
+    2. Lip Mask Generation
+    3. Thin Plate Spline (TPS) Deformation
+    4. Local Refinement (Simulated AI)
+    5. Poisson Blending
+    
     Args:
-        image: Decoded patient photo (HxWx3 uint8 BGR).
-        config: Lips-specific simulation parameters.
-
+        image: BGR numpy array (original photo).
+        volume_ml: Target volume.
+        intensity: Normalised intensity (0-1).
+        upper_lower_balance: -100 to 100 weighting.
+        face_detector: Instance of FaceDetector to avoid re-initializing.
+        
     Returns:
-        ``LipsSimulationResult`` with the simulated image on success.
-
-    TODO:
-        - Wire up ``extract_lip_landmarks`` from landmarks.py.
-        - Wire up ``build_lip_mask`` from mask.py.
-        - Wire up ``apply_lip_deformation`` from deformation.py.
-        - Wire up ``refine_lip_region`` from refinement.py.
-        - Wire up ``poisson_blend`` from app.common.blending.
-        - Add identity-preservation validation.
-        - Add non-target leakage validation.
+        The simulated BGR image.
     """
-    logger.info(
-        "run_lips_simulation called with volume=%.1f, intensity=%.2f, level=%s",
-        config.volume_ml,
-        config.intensity,
-        config.enhancement_level,
+    if face_detector is None:
+        face_detector = FaceDetector()
+        
+    # 1. Face Detection & Landmark Extraction
+    face_pts = face_detector.get_landmarks(image)
+    lip_pts = extract_lip_landmarks(face_pts)
+    
+    # 2. Lip Mask Generation
+    # We use a slight feathering so the blend is smooth.
+    mask = build_lip_mask(image.shape, lip_pts, feather_amount=15)
+    
+    # 3. Deformation (TPS)
+    deformed_img = apply_lip_deformation(
+        image=image,
+        lip_pts=lip_pts,
+        volume=volume_ml,
+        intensity=intensity,
+        upper_lower_balance=upper_lower_balance
     )
-
-    # TODO: Implement the pipeline steps listed above.
-    return LipsSimulationResult(
-        image=None,
-        success=False,
-        message="Lips simulation pipeline is under development.",
-    )
+    
+    # 4. Refinement (Simulated Generative AI cleanup)
+    refined_img = refine_lip_region(deformed_img, mask)
+    
+    # 5. Alpha Blending (Merge the refined lip back into the original image seamlessly)
+    mask_norm = mask.astype(np.float32) / 255.0
+    if len(mask_norm.shape) == 2:
+        mask_norm = np.expand_dims(mask_norm, axis=-1)
+    
+    final_img = (refined_img * mask_norm + image * (1.0 - mask_norm)).astype(np.uint8)
+    
+    # 6. Dotted Line Overlay
+    # Draw a dotted/dashed line of the original outer_lips to show the "before" state
+    import cv2
+    original_pts = lip_pts['outer_lips'].reshape((-1, 1, 2)).astype(np.int32)
+    
+    # Simple hack for dashed lines using cv2.polylines is hard, 
+    # but we can draw circles at the landmark points and connect them or just draw small segments.
+    # We will just draw a thin translucent line for simplicity and aesthetics.
+    overlay = final_img.copy()
+    cv2.polylines(overlay, [original_pts], isClosed=True, color=(255, 255, 255), thickness=1, lineType=cv2.LINE_AA)
+    
+    # Make the line slightly transparent
+    alpha = 0.6
+    final_img = cv2.addWeighted(overlay, alpha, final_img, 1 - alpha, 0)
+    
+    return final_img

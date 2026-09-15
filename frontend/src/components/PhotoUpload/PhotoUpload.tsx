@@ -3,6 +3,7 @@ import type { ChangeEvent, DragEvent } from 'react'
 import { ImagePlus, ShieldCheck, X } from 'lucide-react'
 import clsx from 'clsx'
 import { Button } from '../common/Button'
+import { ImageCropper } from './ImageCropper'
 import type { PatientPhotoState } from '../../types/simulation'
 import { formatBytes } from '../../utils/format'
 
@@ -20,6 +21,7 @@ export function PhotoUpload({ photo, onPhotoSelected, onClear, onConsentChange }
   const inputRef = useRef<HTMLInputElement>(null)
   const [isDragging, setIsDragging] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [cropOriginalUrl, setCropOriginalUrl] = useState<string | null>(null)
 
   const validateAndUse = useCallback(
     (file: File | undefined) => {
@@ -34,9 +36,9 @@ export function PhotoUpload({ photo, onPhotoSelected, onClear, onConsentChange }
       }
       setError(null)
       const previewUrl = URL.createObjectURL(file)
-      onPhotoSelected(file, previewUrl)
+      setCropOriginalUrl(previewUrl)
     },
-    [onPhotoSelected],
+    [],
   )
 
   const handleInputChange = (event: ChangeEvent<HTMLInputElement>) => {
@@ -65,7 +67,7 @@ export function PhotoUpload({ photo, onPhotoSelected, onClear, onConsentChange }
         </span>
       </label>
 
-      {!photo.previewUrl ? (
+      {(!photo.previewUrl && !cropOriginalUrl) ? (
         <div
           onDragOver={(e) => {
             e.preventDefault()
@@ -105,10 +107,22 @@ export function PhotoUpload({ photo, onPhotoSelected, onClear, onConsentChange }
           />
           {error && <p className="text-sm text-danger">{error}</p>}
         </div>
+      ) : cropOriginalUrl ? (
+        <ImageCropper
+          imageSrc={cropOriginalUrl}
+          onCropComplete={(file, previewUrl) => {
+            setCropOriginalUrl(null)
+            onPhotoSelected(file, previewUrl)
+          }}
+          onCancel={() => {
+            setCropOriginalUrl(null)
+            onClear()
+          }}
+        />
       ) : (
         <div className="w-full overflow-hidden rounded-2xl border border-border bg-surface-raised">
           <div className="relative">
-            <img src={photo.previewUrl} alt="Uploaded patient reference" className="max-h-96 w-full object-cover" />
+            <img src={photo.previewUrl || ''} alt="Uploaded patient reference" className="max-h-[70vh] w-full object-contain bg-black/10 dark:bg-black/40" />
             <button
               type="button"
               onClick={onClear}

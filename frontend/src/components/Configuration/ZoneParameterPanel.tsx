@@ -14,9 +14,11 @@ import type {
 interface ZoneParameterPanelProps {
   zone: TreatmentZone
   configuration: ConfigurationState
+  assessment?: import('../../types/simulation').AssessmentState
   disabled: boolean
   onUpdate: (zone: TreatmentZone, patch: Record<string, unknown>) => void
   onReset: (zone: TreatmentZone) => void
+  onAnswerQuestion?: (key: string, val: string) => void
 }
 
 const LIP_LEVELS: { id: LipEnhancementLevel; label: string }[] = [
@@ -31,13 +33,51 @@ const CHEEK_SIDES: { id: CheekSide; label: string }[] = [
   { id: 'right', label: 'Right' },
 ]
 
-export function ZoneParameterPanel({ zone, configuration, disabled, onUpdate, onReset }: ZoneParameterPanelProps) {
+export function ZoneParameterPanel({ zone, configuration, assessment, disabled, onUpdate, onReset, onAnswerQuestion }: ZoneParameterPanelProps) {
   const limit = ZONE_VOLUME_LIMITS[zone]
 
   if (zone === 'lips') {
     const params = configuration.parameters.lips
     return (
       <div className="flex flex-col gap-5">
+        {/* Consultation Questions */}
+        {assessment && onAnswerQuestion && (
+          <div className="flex flex-col gap-5 border-b border-border pb-6 mb-2">
+            <div className="flex flex-col gap-3">
+              <label className="text-sm text-ink font-medium">Focus Area</label>
+              <SegmentedControl
+                options={[
+                  { id: 'Define Border', label: 'Define Border' },
+                  { id: 'Volume Body', label: 'Volume Body' },
+                ]}
+                value={assessment.consultationAnswers.focus || ''}
+                disabled={disabled}
+                onChange={(v) => onAnswerQuestion('focus', v)}
+              />
+            </div>
+            
+            <div className="flex flex-col gap-3">
+              <label className="text-sm text-ink font-medium">Projection vs Vertical Height</label>
+              <SegmentedControl
+                options={[
+                  { id: 'Increase Projection', label: 'Projection' },
+                  { id: 'Vertical Height', label: 'Vertical Height' },
+                ]}
+                value={assessment.consultationAnswers.projection || ''}
+                disabled={disabled}
+                onChange={(v) => onAnswerQuestion('projection', v)}
+              />
+            </div>
+            
+            {assessment.analysisResult && (
+              <div className="rounded-lg bg-accent/10 p-3 text-xs text-accent-strong">
+                <p className="font-semibold mb-1">Golden Ratio Recommendation Applied</p>
+                {assessment.analysisResult.recommendation.text}
+              </div>
+            )}
+          </div>
+        )}
+
         <ParameterSlider
           label="Lip volume"
           value={params.volumeMl}

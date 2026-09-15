@@ -33,25 +33,46 @@ function volumeCeiling(zone: SimulationRequestPayload['zone']) {
  * and tested end to end. Swap the body of this function for a call to
  * POST /api/simulations and keep the return type identical.
  */
-export async function mockSimulationResult(
-  photoUrl: string,
+export async function runSimulationApi(
+  photoFile: File,
   config: ConfigurationState,
 ): Promise<SimulationResult> {
   const requestPayload = buildRequestPayload(config)
-  const totalVolumeMl = requestPayload.reduce((sum, p) => sum + p.volume, 0)
 
-  // Simulate network + processing latency.
-  await new Promise((resolve) => setTimeout(resolve, 1600))
+  const base64Data = await new Promise<string>((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onload = () => resolve(reader.result as string)
+    reader.onerror = reject
+    reader.readAsDataURL(photoFile)
+  })
 
+  const response = await fetch('http://localhost:8000/api/simulations', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      image_url: '',
+      image_base64: base64Data,
+      zones: requestPayload,
+    }),
+  })
+
+  if (!response.ok) {
+    throw new Error('Simulation failed on server')
+  }
+
+  const result = await response.json()
+  
+  // Map backend response properties to frontend camelCase expectations
   return {
-    id: `sim_${Date.now()}`,
-    beforeImageUrl: photoUrl,
-    afterImageUrl: photoUrl,
-    generatedAt: new Date().toISOString(),
+    id: result.id,
+    beforeImageUrl: result.before_image_url === 'local_base64_used' ? base64Data : result.before_image_url,
+    afterImageUrl: result.after_image_url,
+    generatedAt: result.generated_at,
     requestPayload,
-    estimatedCostUsd: [totalVolumeMl * 650, totalVolumeMl * 950],
-    totalVolumeMl: Number(totalVolumeMl.toFixed(2)),
-    disclaimer:
-      'This is a simulated preview for planning and educational purposes only. Actual results vary by anatomy, product and injector technique.',
+    estimatedCostUsd: result.estimated_cost_usd,
+    totalVolumeMl: result.total_volume_ml,
+    disclaimer: result.disclaimer,
   }
 }

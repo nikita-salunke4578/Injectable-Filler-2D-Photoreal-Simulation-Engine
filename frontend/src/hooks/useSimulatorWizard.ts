@@ -8,9 +8,10 @@ import type {
   TreatmentZone,
   WizardStep,
   ZoneParameterMap,
+  AnalysisResult,
 } from '../types/simulation'
 import { WIZARD_STEPS } from '../mock/staticData'
-import { mockSimulationResult } from '../mock/mockSimulationResult'
+import { runSimulationApi } from '../mock/mockSimulationResult'
 
 interface WizardState {
   step: WizardStep
@@ -31,7 +32,13 @@ const DEFAULT_PARAMETERS: ZoneParameterMap = {
 const initialState: WizardState = {
   step: 'photo',
   photo: { file: null, previewUrl: null, consentGiven: false, captureMethod: null },
-  assessment: { ageRange: null, primaryZone: null, experience: null },
+  assessment: { 
+    ageRange: null, 
+    primaryZone: null, 
+    experience: null, 
+    analysisResult: null, 
+    consultationAnswers: {} 
+  },
   configuration: {
     activeZone: 'lips',
     enabledZones: { lips: true, cheeks: false, jaw: false },
@@ -57,6 +64,8 @@ type Action =
   | { type: 'SIMULATION_SUCCESS'; result: SimulationResult }
   | { type: 'SIMULATION_ERROR'; message: string }
   | { type: 'START_OVER' }
+  | { type: 'ANALYSIS_SUCCESS'; result: AnalysisResult }
+  | { type: 'SET_CONSULTATION_ANSWER'; key: string; value: string }
 
 function reducer(state: WizardState, action: Action): WizardState {
   switch (action.type) {
@@ -90,6 +99,19 @@ function reducer(state: WizardState, action: Action): WizardState {
         },
       }
     }
+    case 'ANALYSIS_SUCCESS':
+      return {
+        ...state,
+        assessment: { ...state.assessment, analysisResult: action.result }
+      }
+    case 'SET_CONSULTATION_ANSWER':
+      return {
+        ...state,
+        assessment: { 
+          ...state.assessment, 
+          consultationAnswers: { ...state.assessment.consultationAnswers, [action.key]: action.value }
+        }
+      }
     case 'SET_ACTIVE_ZONE':
       return { ...state, configuration: { ...state.configuration, activeZone: action.zone } }
     case 'TOGGLE_ZONE':
@@ -144,7 +166,9 @@ export function useSimulatorWizard() {
 
   const canContinueFromPhoto = Boolean(state.photo.previewUrl && state.photo.consentGiven)
   const canContinueFromAssessment = Boolean(
-    state.assessment.ageRange && state.assessment.primaryZone && state.assessment.experience,
+    state.assessment.analysisResult && 
+    state.assessment.consultationAnswers.focus && 
+    state.assessment.consultationAnswers.projection
   )
   const hasEnabledZone = Object.values(state.configuration.enabledZones).some(Boolean)
 
@@ -163,6 +187,45 @@ export function useSimulatorWizard() {
     [],
   )
 
+  const setConsultationAnswer = useCallback(
+    (key: string, value: string) => dispatch({ type: 'SET_CONSULTATION_ANSWER', key, value }),
+    []
+  )
+
+  const runAnalysis = useCallback(async () => {
+    if (!state.photo.file) return
+    try {
+      const base64Data = await new Promise<string>((resolve, reject) => {
+        const reader = new FileReader()
+        reader.onload = () => resolve(reader.result as string)
+        reader.onerror = reject
+        reader.readAsDataURL(state.photo.file!)
+      })
+      const response = await fetch('http://localhost:8000/api/analyze-face', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ image_base64: base64Data, zone: state.configuration.activeZone }),
+      })
+      if (response.ok) {
+        const result = await response.json()
+        dispatch({ type: 'ANALYSIS_SUCCESS', result })
+        // Apply recommendations automatically
+        if (result.recommendation) {
+          dispatch({ 
+            type: 'UPDATE_ZONE_PARAMS', 
+            zone: state.configuration.activeZone, 
+            patch: { 
+              volumeMl: result.recommendation.suggested_volume_ml,
+              upperLowerBalance: result.recommendation.suggested_upper_lower_balance
+            }
+          })
+        }
+      }
+    } catch (e) {
+      console.error("Analysis failed", e)
+    }
+  }, [state.photo.file, state.configuration.activeZone])
+
   const setActiveZone = useCallback((zone: TreatmentZone) => dispatch({ type: 'SET_ACTIVE_ZONE', zone }), [])
   const toggleZone = useCallback(
     (zone: TreatmentZone, enabled: boolean) => dispatch({ type: 'TOGGLE_ZONE', zone, enabled }),
@@ -177,16 +240,16 @@ export function useSimulatorWizard() {
   const resetAllParams = useCallback(() => dispatch({ type: 'RESET_ALL_PARAMS' }), [])
 
   const runSimulation = useCallback(async () => {
-    if (!state.photo.previewUrl) return
+    if (!state.photo.file) return
     dispatch({ type: 'SIMULATION_START' })
     try {
-      const result = await mockSimulationResult(state.photo.previewUrl, state.configuration)
+      const result = await runSimulationApi(state.photo.file, state.configuration)
       dispatch({ type: 'SIMULATION_SUCCESS', result })
       dispatch({ type: 'GO_TO_STEP', step: 'preview' })
     } catch {
       dispatch({ type: 'SIMULATION_ERROR', message: 'Simulation failed. Please try again.' })
     }
-  }, [state.photo.previewUrl, state.configuration])
+  }, [state.photo.file, state.configuration])
 
   const startOver = useCallback(() => dispatch({ type: 'START_OVER' }), [])
 
@@ -201,6 +264,8 @@ export function useSimulatorWizard() {
     clearPhoto,
     setConsent,
     setAssessment,
+    setConsultationAnswer,
+    runAnalysis,
     setActiveZone,
     toggleZone,
     updateZoneParams,

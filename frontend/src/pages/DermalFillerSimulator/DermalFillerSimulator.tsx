@@ -5,7 +5,6 @@ import { Stepper } from '../../components/Stepper/Stepper'
 import { Badge } from '../../components/common/Badge'
 import { Button } from '../../components/common/Button'
 import { PhotoUpload } from '../../components/PhotoUpload/PhotoUpload'
-import { Assessment } from '../../components/Assessment/Assessment'
 import { Configuration, ConfigurationFooter } from '../../components/Configuration/Configuration'
 import { SimulationPreview } from '../../components/SimulationPreview/SimulationPreview'
 import { useSimulatorWizard } from '../../hooks/useSimulatorWizard'
@@ -23,7 +22,6 @@ export function DermalFillerSimulator({ onBack }: DermalFillerSimulatorProps) {
 
   const stepTitle: Record<WizardStep, string> = {
     photo: 'Dermal Filler Simulator',
-    assessment: 'Patient Assessment',
     configure: 'Configure',
     preview: 'Preview',
   }
@@ -70,7 +68,10 @@ export function DermalFillerSimulator({ onBack }: DermalFillerSimulatorProps) {
               <Button
                 variant="primary"
                 disabled={!wizard.canContinueFromPhoto}
-                onClick={() => wizard.goToStep('assessment')}
+                onClick={() => {
+                  wizard.runAnalysis()
+                  wizard.goToStep('configure')
+                }}
               >
                 Continue
               </Button>
@@ -78,23 +79,7 @@ export function DermalFillerSimulator({ onBack }: DermalFillerSimulatorProps) {
           </>
         )}
 
-        {state.step === 'assessment' && (
-          <>
-            <Assessment value={state.assessment} onChange={wizard.setAssessment} />
-            <div className="mx-auto flex w-full max-w-3xl items-center justify-between">
-              <Button variant="secondary" onClick={() => wizard.goToStep('photo')}>
-                Back
-              </Button>
-              <Button
-                variant="primary"
-                disabled={!wizard.canContinueFromAssessment}
-                onClick={() => wizard.goToStep('configure')}
-              >
-                Continue to configuration
-              </Button>
-            </div>
-          </>
-        )}
+
 
         {state.step === 'configure' && (
           <>
@@ -107,7 +92,7 @@ export function DermalFillerSimulator({ onBack }: DermalFillerSimulatorProps) {
               onResetAll={wizard.resetAllParams}
             />
             <ConfigurationFooter
-              onBack={() => wizard.goToStep('assessment')}
+              onBack={() => wizard.goToStep('photo')}
               onContinue={wizard.runSimulation}
               disabled={!wizard.hasEnabledZone || state.simulationStatus === 'loading'}
             />

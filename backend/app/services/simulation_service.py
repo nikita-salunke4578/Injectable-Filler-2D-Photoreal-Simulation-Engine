@@ -22,9 +22,13 @@ Usage:
 from __future__ import annotations
 
 import logging
+import uuid
+from datetime import datetime
 from typing import Any
 
-from app.common.schemas import TreatmentZone
+from app.common.schemas import SimulationRequest, SimulationResponse, TreatmentZone
+from app.common.image_io import decode_image_base64, encode_image_base64
+from app.simulations.lips.pipeline import run_lips_pipeline
 
 logger = logging.getLogger(__name__)
 
@@ -38,57 +42,61 @@ class SimulationService:
 
     async def run_simulation(
         self,
-        image_url: str,
-        zone: TreatmentZone,
-        params: dict[str, Any],
-    ) -> dict[str, Any]:
-        """Run a simulation for the specified treatment zone.
+        request: SimulationRequest,
+    ) -> SimulationResponse:
+        """Run a simulation for the specified treatment zones.
 
         Args:
-            image_url: URL of the patient photo to process.
-            zone: Treatment zone to simulate.
-            params: Zone-specific parameter dictionary.
+            request: SimulationRequest containing image and zones.
 
         Returns:
-            Dictionary with simulation results (will be mapped to
-            ``SimulationResponse`` by the API layer).
-
-        TODO:
-            - Download image via ``load_image_from_url``.
-            - Validate image via ``validate_image_file``.
-            - Dispatch to the appropriate pipeline based on ``zone``.
-            - Convert pipeline result to response dict.
-            - Handle and map pipeline exceptions.
+            SimulationResponse with before/after image URLs and metadata.
         """
-        logger.info("run_simulation called for zone=%s (placeholder)", zone.value)
+        # 1. Download/Decode Image
+        if request.image_base64:
+            # Local testing mode
+            image = decode_image_base64(request.image_base64)
+            before_url = "local_base64_used"
+        else:
+            # Cloudinary flow (mocked)
+            raise ValueError("Cloudinary URL flow not yet implemented. Please send image_base64.")
+            
+        current_image = image.copy()
+        
+        # 2. Iterate Zones and Apply Deformation
+        total_vol = 0.0
+        for z_req in request.zones:
+            if z_req.zone == TreatmentZone.LIPS:
+                # Extract specific lip parameters
+                upper_lower_balance = z_req.meta.get("upperLowerBalance", 0)
+                
+                current_image = run_lips_pipeline(
+                    image=current_image,
+                    volume_ml=z_req.volume,
+                    intensity=z_req.intensity,
+                    upper_lower_balance=upper_lower_balance
+                )
+                
+            elif z_req.zone == TreatmentZone.CHEEKS:
+                # TODO: Implement cheeks
+                pass
+            elif z_req.zone == TreatmentZone.JAW:
+                # TODO: Implement jaw
+                pass
+                
+            total_vol += z_req.volume
 
-        if zone == TreatmentZone.LIPS:
-            # TODO: from app.simulations.lips.pipeline import run_lips_simulation
-            return self._placeholder_result(zone, params)
-
-        if zone == TreatmentZone.CHEEKS:
-            # TODO: from app.simulations.cheeks.pipeline import run_cheeks_simulation
-            return self._placeholder_result(zone, params)
-
-        if zone == TreatmentZone.JAW:
-            # TODO: from app.simulations.jaw.pipeline import run_jaw_simulation
-            return self._placeholder_result(zone, params)
-
-        # Defensive — should never reach here due to enum validation.
-        raise ValueError(f"Unsupported treatment zone: {zone}")
-
-    @staticmethod
-    def _placeholder_result(
-        zone: TreatmentZone,
-        params: dict[str, Any],
-    ) -> dict[str, Any]:
-        """Return a safe placeholder result while pipelines are unimplemented."""
-        return {
-            "zone": zone.value,
-            "status": "not_implemented",
-            "message": (
-                f"The {zone.value} simulation pipeline is under development. "
-                "This placeholder confirms that the service dispatch is working."
-            ),
-            "params_received": params,
-        }
+        # 3. Encode result
+        after_url = encode_image_base64(current_image)
+        
+        # 4. Construct Response
+        return SimulationResponse(
+            id=str(uuid.uuid4()),
+            before_image_url=before_url,
+            after_image_url=after_url,
+            generated_at=datetime.utcnow(),
+            request_payload=request.zones,
+            estimated_cost_usd=(total_vol * 600.0, total_vol * 800.0),
+            total_volume_ml=total_vol,
+            disclaimer="Simulated outcome only."
+        )

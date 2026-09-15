@@ -4,7 +4,7 @@ export type AgeRange = '18-30' | '30-45' | '45-60' | '60+'
 
 export type FillerExperience = 'first-time' | 'maintenance' | 'correction'
 
-export type WizardStep = 'photo' | 'assessment' | 'configure' | 'preview'
+export type WizardStep = 'photo' | 'configure' | 'preview'
 
 export interface StepDefinition {
   id: WizardStep
@@ -19,10 +19,29 @@ export interface PatientPhotoState {
   captureMethod: 'upload' | 'camera' | null
 }
 
+export interface AnalysisResult {
+  metrics: {
+    upper_height_px: number
+    lower_height_px: number
+    current_ratio: number
+    ideal_ratio: number
+  }
+  recommendation: {
+    text: string
+    suggested_volume_ml: number
+    suggested_upper_lower_balance: number
+  }
+}
+
 export interface AssessmentState {
   ageRange: AgeRange | null
   primaryZone: TreatmentZone | null
   experience: FillerExperience | null
+  analysisResult: AnalysisResult | null
+  consultationAnswers: {
+    focus?: string
+    projection?: string
+  }
 }
 
 export type LipEnhancementLevel = 'subtle' | 'natural' | 'full'

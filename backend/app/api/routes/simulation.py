@@ -35,31 +35,13 @@ async def run_simulation(request: SimulationRequest) -> dict:
         request: Validated ``SimulationRequest`` body.
 
     Returns:
-        Placeholder result dict.  Will return ``SimulationResponse``
-        once pipelines are implemented.
-
-    TODO:
-        - Map request zones to individual pipeline calls.
-        - Combine results across zones.
-        - Return a proper ``SimulationResponse``.
+        SimulationResponse mapped to dict.
     """
-    results = []
-    for zone_req in request.zones:
-        try:
-            result = await _service.run_simulation(
-                image_url=request.image_url,
-                zone=zone_req.zone,
-                params=zone_req.meta,
-            )
-            results.append(result)
-        except Exception as exc:
-            raise HTTPException(
-                status_code=500,
-                detail=f"Simulation failed for zone {zone_req.zone.value}: {exc}",
-            ) from exc
-
-    return {
-        "status": "placeholder",
-        "message": "Simulation pipelines are under development.",
-        "zone_results": results,
-    }
+    try:
+        result = await _service.run_simulation(request)
+        return result.model_dump()
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Simulation failed: {exc}",
+        ) from exc

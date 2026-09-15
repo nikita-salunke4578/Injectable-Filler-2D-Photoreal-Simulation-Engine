@@ -11,20 +11,24 @@ import type { ConfigurationState, TreatmentZone } from '../../types/simulation'
 
 interface ConfigurationProps {
   configuration: ConfigurationState
+  assessment?: import('../../types/simulation').AssessmentState
   onSelectZone: (zone: TreatmentZone) => void
   onToggleZone: (zone: TreatmentZone, enabled: boolean) => void
   onUpdateZoneParams: (zone: TreatmentZone, patch: Record<string, unknown>) => void
   onResetZone: (zone: TreatmentZone) => void
   onResetAll: () => void
+  onAnswerQuestion?: (key: string, val: string) => void
 }
 
 export function Configuration({
   configuration,
+  assessment,
   onSelectZone,
   onToggleZone,
   onUpdateZoneParams,
   onResetZone,
   onResetAll,
+  onAnswerQuestion,
 }: ConfigurationProps) {
   const [activePresetId, setActivePresetId] = useState<string | null>(null)
 
@@ -75,12 +79,14 @@ export function Configuration({
           <ZoneParameterPanel
             zone={configuration.activeZone}
             configuration={configuration}
+            assessment={assessment}
             disabled={!configuration.enabledZones[configuration.activeZone]}
             onUpdate={(zone, patch) => {
               onUpdateZoneParams(zone, patch)
               setActivePresetId(null)
             }}
             onReset={onResetZone}
+            onAnswerQuestion={onAnswerQuestion}
           />
         </Card>
       </div>
