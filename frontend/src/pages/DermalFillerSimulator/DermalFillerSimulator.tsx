@@ -1,6 +1,5 @@
 import { useState } from 'react'
-import { Droplet } from 'lucide-react'
-import { AppHeader } from '../../components/layout/AppHeader'
+import { ArrowLeft, Droplet } from 'lucide-react'
 import { InfoStrip } from '../../components/layout/InfoStrip'
 import { Stepper } from '../../components/Stepper/Stepper'
 import { Badge } from '../../components/common/Badge'
@@ -13,7 +12,11 @@ import { useSimulatorWizard } from '../../hooks/useSimulatorWizard'
 import { WIZARD_STEPS } from '../../mock/staticData'
 import type { WizardStep } from '../../types/simulation'
 
-export function DermalFillerSimulator() {
+interface DermalFillerSimulatorProps {
+  onBack?: () => void
+}
+
+export function DermalFillerSimulator({ onBack }: DermalFillerSimulatorProps) {
   const wizard = useSimulatorWizard()
   const [showDoseOverlay, setShowDoseOverlay] = useState(true)
   const { state } = wizard
@@ -26,8 +29,21 @@ export function DermalFillerSimulator() {
   }
 
   return (
-    <div className="min-h-screen bg-base">
-      <AppHeader />
+    <>
+      {/* Contextual sub-header for the simulator */}
+      <div className="flex items-center gap-3 border-b border-border px-6 py-3">
+        {onBack && (
+          <button
+            type="button"
+            onClick={onBack}
+            className="flex h-7 w-7 items-center justify-center rounded-md text-ink-muted transition-colors hover:bg-surface-raised hover:text-ink"
+            aria-label="Back to dashboard"
+          >
+            <ArrowLeft size={15} />
+          </button>
+        )}
+        <span className="text-xs font-semibold tracking-wide text-ink-faint">SIMULATION WIZARD</span>
+      </div>
       <InfoStrip showDoseOverlay={showDoseOverlay} onToggleDoseOverlay={setShowDoseOverlay} />
 
       <main className="mx-auto flex max-w-6xl flex-col gap-8 px-6 py-10">
@@ -113,6 +129,6 @@ export function DermalFillerSimulator() {
           {WIZARD_STEPS.length}-step simulation workflow · configuration only, not medical advice
         </p>
       </main>
-    </div>
+    </>
   )
 }

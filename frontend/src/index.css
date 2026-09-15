@@ -36,6 +36,10 @@ body,
   height: 100%;
 }
 
+html {
+  scroll-behavior: smooth;
+}
+
 body {
   margin: 0;
   background: var(--color-base);
@@ -108,3 +112,23 @@ input[type='range'].zone-slider:disabled {
     transition-duration: 0.001ms !important;
   }
 }
+
+/* Dark-theme scrollbar — matches the surface palette */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: var(--color-surface-sunken);
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--color-border-strong);
+  border-radius: 999px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--color-ink-faint);
+}
+

@@ -1,6 +1,6 @@
 import { useCallback, useRef, useState } from 'react'
 import type { ChangeEvent, DragEvent } from 'react'
-import { Camera, ImagePlus, ShieldCheck, X } from 'lucide-react'
+import { ImagePlus, ShieldCheck, X } from 'lucide-react'
 import clsx from 'clsx'
 import { Button } from '../common/Button'
 import type { PatientPhotoState } from '../../types/simulation'

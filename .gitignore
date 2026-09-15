@@ -29,3 +29,11 @@ coverage/
 # Operating system files
 .DS_Store
 Thumbs.db
+
+CLOUDINARY_CLOUD_NAME=
+CLOUDINARY_API_KEY=
+CLOUDINARY_API_SECRET=
+
+ENVIRONMENT=development
+
+MAX_IMAGE_SIZE_MB=10
