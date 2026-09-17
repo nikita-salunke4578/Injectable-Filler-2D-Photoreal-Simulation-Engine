@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import logging
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
 from app.common.schemas import SimulationRequest, SimulationResponse, TreatmentZone
@@ -101,7 +101,7 @@ class SimulationService:
             id=str(uuid.uuid4()),
             before_image_url=before_url,
             after_image_url=after_url,
-            generated_at=datetime.utcnow(),
+            generated_at=datetime.now(timezone.utc),
             request_payload=request.zones,
             estimated_cost_usd=(total_vol * 600.0, total_vol * 800.0),
             total_volume_ml=total_vol,

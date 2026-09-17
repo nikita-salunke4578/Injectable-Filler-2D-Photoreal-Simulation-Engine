@@ -22,6 +22,36 @@ export function SimulationPreview({ status, result, error, onReconfigure, onStar
   const [showDoseOverlay, setShowDoseOverlay] = useState(true)
   const [sideBySide, setSideBySide] = useState(false)
 
+  const handleDownload = () => {
+    if (!result) return
+    const a = document.createElement('a')
+    a.href = result.afterImageUrl
+    a.download = `simulation_result_${new Date().getTime()}.png`
+    document.body.appendChild(a)
+    a.click()
+    document.body.removeChild(a)
+  }
+
+  const handleShare = async () => {
+    if (!result) return
+    try {
+      const response = await fetch(result.afterImageUrl)
+      const blob = await response.blob()
+      const file = new File([blob], 'simulation.png', { type: 'image/png' })
+      if (navigator.canShare && navigator.canShare({ files: [file] })) {
+        await navigator.share({
+          files: [file],
+          title: 'Simulation Result',
+          text: 'Check out my simulation result!'
+        })
+      } else {
+        alert('Sharing files is not supported on this device.')
+      }
+    } catch (e) {
+      console.error('Share failed', e)
+    }
+  }
+
   if (status === 'loading') {
     return (
       <div className="mx-auto flex max-w-2xl flex-col items-center gap-4 py-16 text-center">
@@ -97,10 +127,10 @@ export function SimulationPreview({ status, result, error, onReconfigure, onStar
           </Button>
         </div>
         <div className="flex gap-2">
-          <Button variant="secondary" icon={<Share2 size={15} />}>
+          <Button variant="secondary" icon={<Share2 size={15} />} onClick={handleShare}>
             Share
           </Button>
-          <Button variant="primary" icon={<Download size={15} />}>
+          <Button variant="primary" icon={<Download size={15} />} onClick={handleDownload}>
             Download
           </Button>
         </div>

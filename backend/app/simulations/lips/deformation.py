@@ -20,12 +20,14 @@ def apply_lip_deformation(
     corners = lip_pts.get('corners', np.array([]))
     philtrum_cols = lip_pts.get('philtrum_columns', np.array([]))
     
+    # ── ROI Bounding Box ───────────────────────────────────────────
+    # Keep large enough for smooth RBF but the MASK will restrict visibility
     all_pts = np.vstack([outer_pts, inner_pts])
     if len(nose_base) > 0:
         all_pts = np.vstack([all_pts, nose_base])
         
-    x_min, y_min = np.min(all_pts, axis=0) - 80
-    x_max, y_max = np.max(all_pts, axis=0) + 80
+    x_min, y_min = np.min(all_pts, axis=0) - 60
+    x_max, y_max = np.max(all_pts, axis=0) + 60
     x_min, y_min = max(int(x_min), 0), max(int(y_min), 0)
     x_max, y_max = min(int(x_max), w), min(int(y_max), h)
     
@@ -34,46 +36,61 @@ def apply_lip_deformation(
     if roi_w < 10 or roi_h < 10:
         return image.copy(), mask.copy()
     
+    # Lip geometry references
     center_x = np.mean(outer_pts[:, 0])
     center_y = np.mean(outer_pts[:, 1])
+    lip_top_y = np.min(outer_pts[:, 1])
+    lip_bot_y = np.max(outer_pts[:, 1])
+    lip_left_x = np.min(outer_pts[:, 0])
+    lip_right_x = np.max(outer_pts[:, 0])
+    lip_half_w = (lip_right_x - lip_left_x) / 2.0 + 1e-6
     
     # Separate inner lip points
     lower_inner = np.array([p for p in inner_pts if p[1] > center_y])
     upper_inner = np.array([p for p in inner_pts if p[1] <= center_y])
     
-    # Build anchor points on the bounding box (these MUST NOT move)
+    # ── Anchor points (MUST NOT move) ──────────────────────────────
+    # Bounding box corners + midpoints
     anchors_bbox = np.array([
         [x_min, y_min], [x_max, y_min], [x_max, y_max], [x_min, y_max],
         [center_x, y_min], [center_x, y_max], [x_min, center_y], [x_max, center_y]
     ])
     
-    anchors = anchors_bbox
+    anchors = anchors_bbox.copy()
+    
+    # Pin nose base — these absolutely must not move
     if len(nose_base) > 0:
         anchors = np.vstack([anchors, nose_base])
+    
+    # Pin lower inner lip (mouth opening line)
     if len(lower_inner) > 0:
         anchors = np.vstack([anchors, lower_inner])
     
-    # ── Dense anchor row between nose and lips ("freeze zone") ─────
-    # This prevents the TPS warp from bleeding upward into the nose.
-    # We create a row of fixed points just above the upper lip boundary
-    # that the RBF must interpolate through with zero displacement.
-    upper_lip_y = np.min(outer_pts[:, 1])  # topmost lip landmark
-    nose_y = np.min(nose_base[:, 1]) if len(nose_base) > 0 else upper_lip_y - 30
+    # ── Freeze zone ABOVE lips (protect nose, mustache) ────────────
+    # Dense rows of fixed points between nose base and upper lip
+    nose_y = np.min(nose_base[:, 1]) if len(nose_base) > 0 else lip_top_y - 30
+    n_freeze = 12
+    freeze_xs = np.linspace(lip_left_x - 30, lip_right_x + 30, n_freeze)
     
-    # Place anchors at 1/3 and 2/3 of the gap between nose and lip top
-    freeze_y1 = nose_y + (upper_lip_y - nose_y) * 0.25
-    freeze_y2 = nose_y + (upper_lip_y - nose_y) * 0.5
-    freeze_y0 = nose_y  # Right at the nose base line
-    
-    lip_left = np.min(outer_pts[:, 0])
-    lip_right = np.max(outer_pts[:, 0])
-    n_freeze = 10  # Number of anchor points per row
-    
-    for fy in [freeze_y0, freeze_y1, freeze_y2]:
-        freeze_xs = np.linspace(lip_left - 20, lip_right + 20, n_freeze)
+    # Three rows: at nose base, 1/3 down, 2/3 down
+    for frac in [0.0, 0.33, 0.66]:
+        fy = nose_y + (lip_top_y - nose_y) * frac
         freeze_row = np.column_stack([freeze_xs, np.full(n_freeze, fy)])
         anchors = np.vstack([anchors, freeze_row])
-        
+    
+    # ── Freeze zone BELOW lips (protect chin, beard) ───────────────
+    chin_y = lip_bot_y + 40  # ~40px below lower lip
+    for frac in [0.33, 0.66, 1.0]:
+        fy = lip_bot_y + (chin_y - lip_bot_y) * frac
+        freeze_row = np.column_stack([freeze_xs, np.full(n_freeze, fy)])
+        anchors = np.vstack([anchors, freeze_row])
+    
+    # ── Freeze zone on SIDES (protect cheeks, nasolabial folds) ────
+    side_ys = np.linspace(lip_top_y - 10, lip_bot_y + 10, 6)
+    for sy in side_ys:
+        anchors = np.vstack([anchors, [[lip_left_x - 35, sy], [lip_right_x + 35, sy]]])
+    
+    # ── Build src/dst control point arrays ─────────────────────────
     src_pts = np.vstack([outer_pts, upper_inner, anchors])
     dst_pts = np.copy(src_pts).astype(np.float64)
     
@@ -84,76 +101,77 @@ def apply_lip_deformation(
     s_dental = dental_show / 100.0
     s_column = philtral_column / 100.0
     
-    # Maximum pixel displacements
-    max_upward = 45.0
-    max_outward = 30.0
-    max_cupid = 20.0
-    max_dental = 25.0
-    max_column_spread = 12.0
+    # Conservative pixel displacements for natural results.
+    # Real filler injections produce subtle changes (2-8mm = ~6-20px at typical resolution).
+    max_upward = 12.0     # philtral shortening (was 45 — way too much)
+    max_outward = 10.0    # vermilion expansion (was 30)
+    max_cupid = 8.0       # cupid's bow lift (was 20)
+    max_dental = 8.0      # dental show (was 25)
+    max_column_spread = 5.0  # philtral column (was 12)
     
     n_outer = len(outer_pts)
     n_upper_inner = len(upper_inner)
     
-    # ── 1. Vermilion Show (expand lips outward from center) ─────────
+    # ── 1. Vermilion Show ──────────────────────────────────────────
+    # Upper lip points move UP only. Lower lip points move DOWN only.
+    # NO lateral expansion — this keeps the lip width natural and
+    # prevents pushing into nasolabial folds or mustache area.
     if s_verm > 0:
         for i in range(n_outer):
-            px, py = dst_pts[i]
-            dx = px - center_x
-            dy = py - center_y
-            dist = np.sqrt(dx**2 + dy**2) + 1e-6
-            dst_pts[i, 0] += (dx / dist) * (s_verm * max_outward)
-            dst_pts[i, 1] += (dy / dist) * (s_verm * max_outward)
-            
-    # ── 2. Philtral Shortening (move upper lip points upward) ──────
-    if s_phil > 0:
-        max_width = (np.max(outer_pts[:, 0]) - np.min(outer_pts[:, 0])) / 2.0
-        if max_width < 1:
-            max_width = 1
-        for i in range(n_outer):
-            px, py = dst_pts[i]
+            py = dst_pts[i, 1]
             if py < center_y:
-                dist_from_center = abs(px - center_x)
-                falloff = max(0, 1.0 - (dist_from_center / max_width))
-                dst_pts[i, 1] -= (s_phil * max_upward) * falloff
+                # Upper lip — move upward only, stronger at center
+                dist_from_center_x = abs(dst_pts[i, 0] - center_x)
+                falloff = max(0, 1.0 - (dist_from_center_x / lip_half_w) ** 2)
+                dst_pts[i, 1] -= s_verm * max_outward * falloff
+            else:
+                # Lower lip — move downward only, stronger at center
+                dist_from_center_x = abs(dst_pts[i, 0] - center_x)
+                falloff = max(0, 1.0 - (dist_from_center_x / lip_half_w) ** 2)
+                dst_pts[i, 1] += s_verm * max_outward * falloff
+            
+    # ── 2. Philtral Shortening ─────────────────────────────────────
+    # Only moves upper lip points upward with center-weighted falloff.
+    if s_phil > 0:
+        for i in range(n_outer):
+            py = dst_pts[i, 1]
+            if py < center_y:
+                dist_from_center_x = abs(dst_pts[i, 0] - center_x)
+                falloff = max(0, 1.0 - (dist_from_center_x / lip_half_w))
+                dst_pts[i, 1] -= s_phil * max_upward * falloff
                 
-    # ── 3. Cupid's Bow (use nearest-point matching, not exact) ─────
+    # ── 3. Cupid's Bow ─────────────────────────────────────────────
+    # Lifts the two cupid's bow peaks slightly with Gaussian falloff
     if s_cupid > 0 and len(cupids_bow_pts) == 2:
-        # Find the outer_pts indices closest to each cupid's bow peak
         for cb in cupids_bow_pts:
             dists_to_cb = np.sqrt(np.sum((outer_pts - cb)**2, axis=1))
-            closest_idx = np.argmin(dists_to_cb)
             
-            # Also affect nearby points for smoother deformation
             for i in range(n_outer):
                 d = dists_to_cb[i]
-                # Gaussian falloff from the cupid's bow point
-                sigma = 15.0  # pixels
+                sigma = 12.0
                 weight = np.exp(-(d**2) / (2 * sigma**2))
                 if weight < 0.05:
                     continue
-                    
+                # Mostly vertical lift, very slight horizontal separation
                 px = dst_pts[i, 0]
                 dir_x = 1.0 if px < center_x else -1.0
-                dst_pts[i, 0] += dir_x * (s_cupid * max_cupid * 0.5) * weight
+                dst_pts[i, 0] += dir_x * (s_cupid * max_cupid * 0.15) * weight
                 dst_pts[i, 1] -= (s_cupid * max_cupid) * weight
 
     # ── 4. Philtral Column Enhancement ─────────────────────────────
     if s_column > 0 and len(philtrum_cols) > 0:
-        # Add philtral column points as additional control points
-        # They should spread slightly outward to create visible ridges
         col_src = philtrum_cols.copy().astype(np.float64)
         col_dst = col_src.copy()
         
         for i in range(len(col_dst)):
             px = col_dst[i, 0]
             dir_x = 1.0 if px < center_x else -1.0
-            # Slight outward push to accentuate the columns
             col_dst[i, 0] += dir_x * (s_column * max_column_spread)
         
         src_pts = np.vstack([src_pts, col_src])
         dst_pts = np.vstack([dst_pts, col_dst])
     
-    # ── 5. Dental Show (lift upper inner lip to reveal teeth) ──────
+    # ── 5. Dental Show ─────────────────────────────────────────────
     if s_dental > 0 and n_upper_inner > 0:
         idx_offset = n_outer
         upper_inner_x = upper_inner[:, 0]
@@ -162,7 +180,7 @@ def apply_lip_deformation(
             px = dst_pts[idx_offset + i, 0]
             dist_from_center = abs(px - center_x)
             falloff = max(0, 1.0 - (dist_from_center / max_inner_width))
-            dst_pts[idx_offset + i, 1] -= (s_dental * max_dental) * falloff
+            dst_pts[idx_offset + i, 1] -= s_dental * max_dental * falloff
 
     # ── Build RBF warp mapping ─────────────────────────────────────
     
@@ -171,7 +189,6 @@ def apply_lip_deformation(
     src_pts = src_pts[unique_indices]
     dst_pts = dst_pts[unique_indices]
     
-    # Ensure we have enough unique points
     if len(src_pts) < 4:
         return image.copy(), mask.copy()
 
@@ -180,31 +197,28 @@ def apply_lip_deformation(
         np.arange(roi_w, dtype=np.float64), 
         np.arange(roi_h, dtype=np.float64)
     )
-    # Convert to absolute coordinates for RBF evaluation
     grid_x_abs = grid_x_local + x_min
     grid_y_abs = grid_y_local + y_min
     
     # RBF: maps from destination coords to source coords
-    # "Where in the source image does each destination pixel come from?"
     rbf_x = Rbf(dst_pts[:, 0], dst_pts[:, 1], src_pts[:, 0], function='thin_plate')
     rbf_y = Rbf(dst_pts[:, 0], dst_pts[:, 1], src_pts[:, 1], function='thin_plate')
     
-    # Evaluate: for each pixel in the output, find where to sample from the source
     src_x_abs = rbf_x(grid_x_abs, grid_y_abs)
     src_y_abs = rbf_y(grid_x_abs, grid_y_abs)
     
-    # Convert source coordinates to ROI-local for cv2.remap
+    # Convert to ROI-local for cv2.remap
     map_x = (src_x_abs - x_min).astype(np.float32)
     map_y = (src_y_abs - y_min).astype(np.float32)
     
-    # Apply remap to ROI
+    # Apply remap to ROI only
     roi = image[y_min:y_max, x_min:x_max]
     warped_roi = cv2.remap(roi, map_x, map_y, interpolation=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REFLECT)
     
     result = image.copy()
     result[y_min:y_max, x_min:x_max] = warped_roi
     
-    # Warp the mask as well
+    # Warp mask in same way
     mask_roi = mask[y_min:y_max, x_min:x_max]
     warped_mask_roi = cv2.remap(mask_roi, map_x, map_y, interpolation=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=0)
     
