@@ -20,7 +20,7 @@ export const CONFIGURATION_PRESETS: ConfigurationPreset[] = [
     description: 'Plump lips, natural ratio — a starting point to explore.',
     recommended: true,
     enabledZones: ['lips'],
-    parameters: { lips: { volumeMl: 1.3, enhancementLevel: 'natural' } },
+    parameters: { lips: { philtralShortening: 30, vermilionShow: 40 } },
   },
   {
     id: 'cheek-contour',
@@ -42,7 +42,7 @@ export const CONFIGURATION_PRESETS: ConfigurationPreset[] = [
     description: 'Moderate volume across lips, cheeks and jaw together.',
     enabledZones: ['lips', 'cheeks', 'jaw'],
     parameters: {
-      lips: { volumeMl: 1.0 },
+      lips: { philtralShortening: 15, vermilionShow: 15 },
       cheeks: { volumeMl: 2.0 },
       jaw: { volumeMl: 1.2, definition: 40 },
     },

@@ -1,98 +1,59 @@
-import { useState } from 'react'
-import { Card } from '../common/Card'
-import { Button } from '../common/Button'
-import { ZoneTabs } from './ZoneTabs'
 import { ZoneParameterPanel } from './ZoneParameterPanel'
 import { MeasurementsPanel } from './MeasurementsPanel'
-import { PresetGrid } from './PresetGrid'
-import { ZONES } from '../../mock/staticData'
-import type { ConfigurationPreset } from '../../mock/presets'
+import { Button } from '../common/Button'
 import type { ConfigurationState, TreatmentZone } from '../../types/simulation'
 
 interface ConfigurationProps {
   configuration: ConfigurationState
-  assessment?: import('../../types/simulation').AssessmentState
   onSelectZone: (zone: TreatmentZone) => void
   onToggleZone: (zone: TreatmentZone, enabled: boolean) => void
   onUpdateZoneParams: (zone: TreatmentZone, patch: Record<string, unknown>) => void
   onResetZone: (zone: TreatmentZone) => void
   onResetAll: () => void
-  onAnswerQuestion?: (key: string, val: string) => void
+  onToggleOutline: (show: boolean) => void
 }
 
 export function Configuration({
   configuration,
-  assessment,
-  onSelectZone,
-  onToggleZone,
   onUpdateZoneParams,
   onResetZone,
-  onResetAll,
-  onAnswerQuestion,
+  onToggleOutline,
 }: ConfigurationProps) {
-  const [activePresetId, setActivePresetId] = useState<string | null>(null)
-
-  const applyPreset = (preset: ConfigurationPreset) => {
-    ZONES.forEach((zone) => onToggleZone(zone.id, preset.enabledZones.includes(zone.id)))
-      ; (Object.keys(preset.parameters) as TreatmentZone[]).forEach((zone) => {
-        const patch = preset.parameters[zone]
-        if (patch) onUpdateZoneParams(zone, patch)
-      })
-    onSelectZone(preset.enabledZones[0] ?? configuration.activeZone)
-    setActivePresetId(preset.id)
-  }
 
   return (
-    <div className="mx-auto grid max-w-5xl grid-cols-1 gap-6 lg:grid-cols-[1fr_300px]">
+    <div className="mx-auto grid max-w-[1200px] grid-cols-1 gap-8 lg:grid-cols-[1fr_350px]">
       <div className="flex flex-col gap-6">
-        <PresetGrid activePresetId={activePresetId} onApply={applyPreset} />
 
-        <Card>
-          <div className="mb-4 flex items-center justify-between">
-            <p className="text-xs font-semibold tracking-wide text-ink-faint">TREATMENT ZONES</p>
-          </div>
-          <ZoneTabs
-            activeZone={configuration.activeZone}
-            enabledZones={configuration.enabledZones}
-            onSelectZone={onSelectZone}
-            onToggleZone={(zone, enabled) => {
-              onToggleZone(zone, enabled)
-              setActivePresetId(null)
-            }}
-          />
-
-          <div className="my-5 border-t border-border" />
-
-          <div className="mb-4 flex items-center justify-between">
-            <p className="text-xs font-semibold tracking-wide text-ink-faint">PARAMETERS</p>
-            <button
-              type="button"
-              onClick={() => {
-                onResetAll()
-                setActivePresetId(null)
-              }}
-              className="text-xs text-ink-muted hover:text-ink"
-            >
-              Reset
-            </button>
-          </div>
-          <ZoneParameterPanel
-            zone={configuration.activeZone}
-            configuration={configuration}
-            assessment={assessment}
-            disabled={!configuration.enabledZones[configuration.activeZone]}
-            onUpdate={(zone, patch) => {
-              onUpdateZoneParams(zone, patch)
-              setActivePresetId(null)
-            }}
-            onReset={onResetZone}
-            onAnswerQuestion={onAnswerQuestion}
-          />
-        </Card>
+        <ZoneParameterPanel
+          zone={configuration.activeZone}
+          configuration={configuration}
+          disabled={!configuration.enabledZones[configuration.activeZone]}
+          onUpdate={(zone, patch) => {
+            onUpdateZoneParams(zone, patch)
+          }}
+          onReset={onResetZone}
+        />
       </div>
 
       <div className="flex flex-col gap-4 lg:sticky lg:top-6 lg:self-start">
         <MeasurementsPanel configuration={configuration} />
+        
+        <div className="mt-4 flex items-center justify-between rounded-xl border border-border bg-surface p-4">
+          <div>
+            <p className="text-sm font-medium text-ink">Show Before Outline</p>
+            <p className="text-xs text-ink-muted">Display a dotted line of original lips</p>
+          </div>
+          <label className="relative inline-flex cursor-pointer items-center">
+            <input 
+              type="checkbox" 
+              className="peer sr-only" 
+              checked={configuration.showOutline}
+              onChange={(e) => onToggleOutline(e.target.checked)} 
+            />
+            <div className="peer h-6 w-11 rounded-full bg-border after:absolute after:left-[2px] after:top-[2px] after:h-5 after:w-5 after:rounded-full after:border after:border-gray-300 after:bg-white after:transition-all after:content-[''] peer-checked:bg-accent peer-checked:after:translate-x-full peer-checked:after:border-white peer-focus:outline-none" />
+          </label>
+        </div>
+        
         <p className="text-xs text-ink-faint">
           These are simulation parameters, not medically authoritative dosage guidance.
         </p>
@@ -111,15 +72,15 @@ export function ConfigurationFooter({
   disabled: boolean
 }) {
   return (
-    <div className="mx-auto grid max-w-5xl grid-cols-1 gap-3 lg:grid-cols-[1fr_300px]">
+    <div className="mx-auto grid max-w-[1200px] grid-cols-1 gap-8 lg:grid-cols-[1fr_350px]">
       <div />
       <div className="flex flex-col gap-3">
         <Button variant="primary" onClick={onContinue} disabled={disabled} className="w-full">
-          Preview results
+          Preview Results →
         </Button>
-        <Button variant="secondary" onClick={onBack} className="w-full">
-          Back
-        </Button>
+        <button onClick={onBack} className="w-full text-sm text-ink-muted hover:text-ink">
+          ← Back to Assessment
+        </button>
       </div>
     </div>
   )

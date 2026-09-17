@@ -23,7 +23,7 @@ export function MeasurementsPanel({ configuration }: { configuration: Configurat
           <p className="mb-2 text-xs font-semibold tracking-wide text-ink-faint">PER-ZONE VOLUME</p>
           <dl className="flex flex-col gap-1.5">
             {activeZones.map((zone) => (
-              <Row key={zone.id} label={zone.label} value={formatMl(configuration.parameters[zone.id].volumeMl)} />
+              <Row key={zone.id} label={zone.label} value={formatMl((configuration.parameters[zone.id] as any).volumeMl || 0)} />
             ))}
           </dl>
         </div>

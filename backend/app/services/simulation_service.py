@@ -68,13 +68,20 @@ class SimulationService:
         for z_req in request.zones:
             if z_req.zone == TreatmentZone.LIPS:
                 # Extract specific lip parameters
-                upper_lower_balance = z_req.meta.get("upperLowerBalance", 0)
+                philtral_shortening = z_req.meta.get("philtralShortening", 0)
+                vermilion_show = z_req.meta.get("vermilionShow", 0)
+                cupids_bow = z_req.meta.get("cupidsBow", 0)
+                philtral_column = z_req.meta.get("philtralColumn", 0)
+                dental_show = z_req.meta.get("dentalShow", 0)
                 
                 current_image = run_lips_pipeline(
                     image=current_image,
-                    volume_ml=z_req.volume,
-                    intensity=z_req.intensity,
-                    upper_lower_balance=upper_lower_balance
+                    philtral_shortening=philtral_shortening,
+                    vermilion_show=vermilion_show,
+                    cupids_bow=cupids_bow,
+                    philtral_column=philtral_column,
+                    dental_show=dental_show,
+                    show_outline=request.show_outline
                 )
                 
             elif z_req.zone == TreatmentZone.CHEEKS:

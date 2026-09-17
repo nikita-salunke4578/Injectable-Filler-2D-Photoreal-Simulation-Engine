@@ -8,7 +8,10 @@ export function getActiveZones(config: ConfigurationState) {
 }
 
 export function getTotalVolume(config: ConfigurationState): number {
-  return getActiveZones(config).reduce((sum, zone) => sum + config.parameters[zone.id].volumeMl, 0)
+  return getActiveZones(config).reduce((sum, zone) => {
+    const params = config.parameters[zone.id] as any
+    return sum + (params.volumeMl || 0)
+  }, 0)
 }
 
 export function getEstimatedCostRange(config: ConfigurationState): [number, number] {

@@ -24,7 +24,7 @@ interface WizardState {
 }
 
 const DEFAULT_PARAMETERS: ZoneParameterMap = {
-  lips: { volumeMl: 0, enhancementLevel: 'natural', upperLowerBalance: 0 },
+  lips: { philtralShortening: 0, vermilionShow: 0, cupidsBow: 0, philtralColumn: 0, dentalShow: 0 },
   cheeks: { volumeMl: 0, side: 'bilateral' },
   jaw: { volumeMl: 0, definition: 0 },
 }
@@ -33,16 +33,17 @@ const initialState: WizardState = {
   step: 'photo',
   photo: { file: null, previewUrl: null, consentGiven: false, captureMethod: null },
   assessment: { 
+    gender: null,
     ageRange: null, 
-    primaryZone: null, 
+    primaryConcern: null, 
     experience: null, 
-    analysisResult: null, 
-    consultationAnswers: {} 
+    analysisResult: null
   },
   configuration: {
     activeZone: 'lips',
     enabledZones: { lips: true, cheeks: false, jaw: false },
     parameters: DEFAULT_PARAMETERS,
+    showOutline: false,
   },
   simulationStatus: 'idle',
   simulationError: null,
@@ -60,12 +61,13 @@ type Action =
   | { type: 'UPDATE_ZONE_PARAMS'; zone: TreatmentZone; patch: Record<string, unknown> }
   | { type: 'RESET_ZONE_PARAMS'; zone: TreatmentZone }
   | { type: 'RESET_ALL_PARAMS' }
+  | { type: 'TOGGLE_OUTLINE'; show: boolean }
   | { type: 'SIMULATION_START' }
   | { type: 'SIMULATION_SUCCESS'; result: SimulationResult }
   | { type: 'SIMULATION_ERROR'; message: string }
   | { type: 'START_OVER' }
   | { type: 'ANALYSIS_SUCCESS'; result: AnalysisResult }
-  | { type: 'SET_CONSULTATION_ANSWER'; key: string; value: string }
+  | { type: 'SET_ASSESSMENT_ANSWER'; key: string; value: string }
 
 function reducer(state: WizardState, action: Action): WizardState {
   switch (action.type) {
@@ -87,16 +89,9 @@ function reducer(state: WizardState, action: Action): WizardState {
       return { ...state, photo: { ...state.photo, consentGiven: action.value } }
     case 'SET_ASSESSMENT': {
       const next = { ...state.assessment, ...action.patch }
-      // Keep configuration's active zone in sync with the chosen primary zone.
-      const activeZone = next.primaryZone ?? state.configuration.activeZone
       return {
         ...state,
         assessment: next,
-        configuration: {
-          ...state.configuration,
-          activeZone,
-          enabledZones: { ...state.configuration.enabledZones, [activeZone]: true },
-        },
       }
     }
     case 'ANALYSIS_SUCCESS':
@@ -104,12 +99,12 @@ function reducer(state: WizardState, action: Action): WizardState {
         ...state,
         assessment: { ...state.assessment, analysisResult: action.result }
       }
-    case 'SET_CONSULTATION_ANSWER':
+    case 'SET_ASSESSMENT_ANSWER':
       return {
         ...state,
         assessment: { 
           ...state.assessment, 
-          consultationAnswers: { ...state.assessment.consultationAnswers, [action.key]: action.value }
+          [action.key]: action.value 
         }
       }
     case 'SET_ACTIVE_ZONE':
@@ -143,6 +138,8 @@ function reducer(state: WizardState, action: Action): WizardState {
       }
     case 'RESET_ALL_PARAMS':
       return { ...state, configuration: { ...state.configuration, parameters: DEFAULT_PARAMETERS } }
+    case 'TOGGLE_OUTLINE':
+      return { ...state, configuration: { ...state.configuration, showOutline: action.show } }
     case 'SIMULATION_START':
       return { ...state, simulationStatus: 'loading', simulationError: null }
     case 'SIMULATION_SUCCESS':
@@ -166,9 +163,9 @@ export function useSimulatorWizard() {
 
   const canContinueFromPhoto = Boolean(state.photo.previewUrl && state.photo.consentGiven)
   const canContinueFromAssessment = Boolean(
-    state.assessment.analysisResult && 
-    state.assessment.consultationAnswers.focus && 
-    state.assessment.consultationAnswers.projection
+    state.assessment.gender && 
+    state.assessment.ageRange && 
+    state.assessment.primaryConcern
   )
   const hasEnabledZone = Object.values(state.configuration.enabledZones).some(Boolean)
 
@@ -187,40 +184,44 @@ export function useSimulatorWizard() {
     [],
   )
 
-  const setConsultationAnswer = useCallback(
-    (key: string, value: string) => dispatch({ type: 'SET_CONSULTATION_ANSWER', key, value }),
+  const setAssessmentAnswer = useCallback(
+    (key: string, value: string) => dispatch({ type: 'SET_ASSESSMENT_ANSWER', key, value }),
     []
   )
 
   const runAnalysis = useCallback(async () => {
     if (!state.photo.file) return
     try {
-      const base64Data = await new Promise<string>((resolve, reject) => {
-        const reader = new FileReader()
-        reader.onload = () => resolve(reader.result as string)
-        reader.onerror = reject
-        reader.readAsDataURL(state.photo.file!)
-      })
-      const response = await fetch('http://localhost:8000/api/analyze-face', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ image_base64: base64Data, zone: state.configuration.activeZone }),
-      })
-      if (response.ok) {
-        const result = await response.json()
-        dispatch({ type: 'ANALYSIS_SUCCESS', result })
-        // Apply recommendations automatically
-        if (result.recommendation) {
-          dispatch({ 
-            type: 'UPDATE_ZONE_PARAMS', 
-            zone: state.configuration.activeZone, 
-            patch: { 
-              volumeMl: result.recommendation.suggested_volume_ml,
-              upperLowerBalance: result.recommendation.suggested_upper_lower_balance
-            }
-          })
+      // Simulate network request to AI backend
+      await new Promise((resolve) => setTimeout(resolve, 1500))
+      
+      const mockedResult = {
+        gender: 'female',
+        ageRange: '20-30',
+        primaryConcern: 'long-upper-lip',
+        recommendation: {
+          philtralShortening: 45,
+          vermilionShow: 35,
+          cupidsBow: 20,
+          philtralColumn: 15,
+          dentalShow: 30
         }
       }
+
+      dispatch({ type: 'ANALYSIS_SUCCESS', result: mockedResult as any })
+      
+      // Auto-fill the assessment answers
+      dispatch({ type: 'SET_ASSESSMENT_ANSWER', key: 'gender', value: mockedResult.gender })
+      dispatch({ type: 'SET_ASSESSMENT_ANSWER', key: 'ageRange', value: mockedResult.ageRange })
+      dispatch({ type: 'SET_ASSESSMENT_ANSWER', key: 'primaryConcern', value: mockedResult.primaryConcern })
+      
+      // Auto-fill the sliders based on the face scan
+      dispatch({ 
+        type: 'UPDATE_ZONE_PARAMS', 
+        zone: state.configuration.activeZone, 
+        patch: mockedResult.recommendation
+      })
+      
     } catch (e) {
       console.error("Analysis failed", e)
     }
@@ -238,6 +239,7 @@ export function useSimulatorWizard() {
   )
   const resetZoneParams = useCallback((zone: TreatmentZone) => dispatch({ type: 'RESET_ZONE_PARAMS', zone }), [])
   const resetAllParams = useCallback(() => dispatch({ type: 'RESET_ALL_PARAMS' }), [])
+  const toggleOutline = useCallback((show: boolean) => dispatch({ type: 'TOGGLE_OUTLINE', show }), [])
 
   const runSimulation = useCallback(async () => {
     if (!state.photo.file) return
@@ -264,13 +266,14 @@ export function useSimulatorWizard() {
     clearPhoto,
     setConsent,
     setAssessment,
-    setConsultationAnswer,
+    setAssessmentAnswer,
     runAnalysis,
     setActiveZone,
     toggleZone,
     updateZoneParams,
     resetZoneParams,
     resetAllParams,
+    toggleOutline,
     runSimulation,
     startOver,
   }

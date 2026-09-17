@@ -4,10 +4,20 @@ import { ZONES } from './staticData'
 function buildRequestPayload(config: ConfigurationState): SimulationRequestPayload[] {
   return ZONES.filter((zone) => config.enabledZones[zone.id]).map((zone) => {
     const params = config.parameters[zone.id]
+    // We don't use volumeMl for lips anymore, but the backend schema still requires a 'volume' and 'intensity' field.
+    // We will set them to 0 and rely on the meta dict.
+    let volume = 0
+    if (zone.id === 'lips') {
+      const p = params as any
+      const intensity = (p.philtralShortening + p.vermilionShow + p.cupidsBow) / 300
+      volume = Math.max(1.0, Number((intensity * 5).toFixed(1))) // 1.0 to 5.0 volume equivalent for cost calc
+    } else {
+      volume = Number((params as any).volumeMl || 0)
+    }
     return {
       zone: zone.id,
-      volume: params.volumeMl,
-      intensity: params.volumeMl > 0 ? Number((params.volumeMl / volumeCeiling(zone.id)).toFixed(2)) : 0,
+      volume: volume,
+      intensity: volume > 0 ? Math.min(1.0, Number((volume / volumeCeiling(zone.id)).toFixed(2))) : 0,
       meta: { ...params },
     }
   })
@@ -54,6 +64,7 @@ export async function runSimulationApi(
     body: JSON.stringify({
       image_url: '',
       image_base64: base64Data,
+      show_outline: config.showOutline,
       zones: requestPayload,
     }),
   })

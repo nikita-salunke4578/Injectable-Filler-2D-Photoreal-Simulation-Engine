@@ -4,7 +4,7 @@ export type AgeRange = '18-30' | '30-45' | '45-60' | '60+'
 
 export type FillerExperience = 'first-time' | 'maintenance' | 'correction'
 
-export type WizardStep = 'photo' | 'configure' | 'preview'
+export type WizardStep = 'photo' | 'assessment' | 'configure' | 'preview'
 
 export interface StepDefinition {
   id: WizardStep
@@ -33,23 +33,28 @@ export interface AnalysisResult {
   }
 }
 
+export type Gender = 'female' | 'male'
+
+export type PrimaryConcern = 
+  | 'long-upper-lip'
+  | 'thin-vermilion'
+  | 'downturned-corners'
+  | 'aging-rejuvenation'
+
 export interface AssessmentState {
+  gender: Gender | null
   ageRange: AgeRange | null
-  primaryZone: TreatmentZone | null
+  primaryConcern: PrimaryConcern | null
   experience: FillerExperience | null
   analysisResult: AnalysisResult | null
-  consultationAnswers: {
-    focus?: string
-    projection?: string
-  }
 }
 
-export type LipEnhancementLevel = 'subtle' | 'natural' | 'full'
-
 export interface LipParameters {
-  volumeMl: number
-  enhancementLevel: LipEnhancementLevel
-  upperLowerBalance: number // -100 (upper-weighted) .. 100 (lower-weighted), 0 = even
+  philtralShortening: number
+  vermilionShow: number
+  cupidsBow: number
+  philtralColumn: number
+  dentalShow: number
 }
 
 export type CheekSide = 'left' | 'right' | 'bilateral'
@@ -74,6 +79,7 @@ export interface ConfigurationState {
   activeZone: TreatmentZone
   enabledZones: Record<TreatmentZone, boolean>
   parameters: ZoneParameterMap
+  showOutline: boolean
 }
 
 /**

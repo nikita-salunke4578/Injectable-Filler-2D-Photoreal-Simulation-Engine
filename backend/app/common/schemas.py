@@ -53,6 +53,7 @@ class SimulationRequest(BaseModel):
 
     image_url: str = Field(description="URL of the uploaded patient photo", default="")
     image_base64: str | None = Field(default=None, description="Base64 encoded image data string")
+    show_outline: bool = Field(default=True, description="Whether to draw the dotted outline on the after image")
     zones: list[ZoneSimulationRequest] = Field(min_length=1)
 
 
