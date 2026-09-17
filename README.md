@@ -469,8 +469,8 @@ The project currently focuses on three regions:
 | Region | Simulation Goal | Ownership |
 |---|---|---|
 | **Lips** | Volume enhancement and contour/shape visualization | Jayam |
-| **Cheeks** | Midface/cheek volume enhancement visualization | Team Member |
-| **Jaw** | Lower-face contour and jawline enhancement visualization | Team Member |
+| **Cheeks** | Midface/cheek volume enhancement visualization | Nikita |
+| **Jaw** | Lower-face contour and jawline enhancement visualization | Saish |
 
 The system is intentionally limited to these three regions for the current project scope.
 
@@ -859,7 +859,7 @@ Result
 
 ## Cheeks Simulation
 
-**Owner: Cheeks Team Member**
+**Owner: Nikita**
 
 Location:
 
@@ -899,7 +899,7 @@ backend/app/common/
 
 ## Jaw Simulation
 
-**Owner: Jaw Team Member**
+**Owner: Saish**
 
 Location:
 
@@ -1510,7 +1510,7 @@ refinement.py
 
 ### Cheeks
 
-Owner:
+Owner: Nikita
 
 ```text
 Cheeks Team Member
@@ -1524,7 +1524,7 @@ backend/app/simulations/cheeks/
 
 ### Jaw
 
-Owner:
+Owner: Saish
 
 ```text
 Jaw Team Member
