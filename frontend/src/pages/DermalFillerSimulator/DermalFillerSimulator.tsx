@@ -83,6 +83,7 @@ export function DermalFillerSimulator({ onBack }: DermalFillerSimulatorProps) {
             <Consultation 
               value={state.assessment} 
               onAnswerQuestion={wizard.setAssessmentAnswer}
+              onTriggerAnalysis={wizard.runAnalysis}
             />
             <div className="mx-auto flex w-full max-w-3xl items-center justify-between">
               <Button variant="secondary" onClick={() => wizard.goToStep('photo')}>

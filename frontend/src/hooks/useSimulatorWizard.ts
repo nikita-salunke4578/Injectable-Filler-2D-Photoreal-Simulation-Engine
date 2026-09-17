@@ -37,7 +37,12 @@ const initialState: WizardState = {
     ageRange: null, 
     primaryConcern: null, 
     experience: null, 
-    analysisResult: null
+    desiredOutcome: null,
+    lipShape: null,
+    symmetryConcern: null,
+    analysisResult: null,
+    analysisLoading: false,
+    analysisError: null,
   },
   configuration: {
     activeZone: 'lips',
@@ -66,7 +71,9 @@ type Action =
   | { type: 'SIMULATION_SUCCESS'; result: SimulationResult }
   | { type: 'SIMULATION_ERROR'; message: string }
   | { type: 'START_OVER' }
+  | { type: 'ANALYSIS_START' }
   | { type: 'ANALYSIS_SUCCESS'; result: AnalysisResult }
+  | { type: 'ANALYSIS_ERROR'; message: string }
   | { type: 'SET_ASSESSMENT_ANSWER'; key: string; value: string }
 
 function reducer(state: WizardState, action: Action): WizardState {
@@ -94,10 +101,20 @@ function reducer(state: WizardState, action: Action): WizardState {
         assessment: next,
       }
     }
+    case 'ANALYSIS_START':
+      return {
+        ...state,
+        assessment: { ...state.assessment, analysisLoading: true, analysisError: null }
+      }
     case 'ANALYSIS_SUCCESS':
       return {
         ...state,
-        assessment: { ...state.assessment, analysisResult: action.result }
+        assessment: { ...state.assessment, analysisResult: action.result, analysisLoading: false, analysisError: null }
+      }
+    case 'ANALYSIS_ERROR':
+      return {
+        ...state,
+        assessment: { ...state.assessment, analysisLoading: false, analysisError: action.message }
       }
     case 'SET_ASSESSMENT_ANSWER':
       return {
@@ -153,6 +170,16 @@ function reducer(state: WizardState, action: Action): WizardState {
   }
 }
 
+/** Convert a File to a base64 data URI string. */
+async function fileToBase64(file: File): Promise<string> {
+  return new Promise<string>((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onload = () => resolve(reader.result as string)
+    reader.onerror = reject
+    reader.readAsDataURL(file)
+  })
+}
+
 export function useSimulatorWizard() {
   const [state, dispatch] = useReducer(reducer, initialState)
 
@@ -165,7 +192,8 @@ export function useSimulatorWizard() {
   const canContinueFromAssessment = Boolean(
     state.assessment.gender && 
     state.assessment.ageRange && 
-    state.assessment.primaryConcern
+    state.assessment.primaryConcern &&
+    !state.assessment.analysisLoading
   )
   const hasEnabledZone = Object.values(state.configuration.enabledZones).some(Boolean)
 
@@ -189,43 +217,78 @@ export function useSimulatorWizard() {
     []
   )
 
+  /**
+   * Calls the real /api/analyze-face endpoint to scan the uploaded face,
+   * compute lip mathematics, and auto-fill assessment answers + config sliders.
+   */
   const runAnalysis = useCallback(async () => {
     if (!state.photo.file) return
+    
+    dispatch({ type: 'ANALYSIS_START' })
+    
     try {
-      // Simulate network request to AI backend
-      await new Promise((resolve) => setTimeout(resolve, 1500))
+      const base64Data = await fileToBase64(state.photo.file)
       
-      const mockedResult = {
-        gender: 'female',
-        ageRange: '20-30',
-        primaryConcern: 'long-upper-lip',
-        recommendation: {
-          philtralShortening: 45,
-          vermilionShow: 35,
-          cupidsBow: 20,
-          philtralColumn: 15,
-          dentalShow: 30
-        }
-      }
-
-      dispatch({ type: 'ANALYSIS_SUCCESS', result: mockedResult as any })
-      
-      // Auto-fill the assessment answers
-      dispatch({ type: 'SET_ASSESSMENT_ANSWER', key: 'gender', value: mockedResult.gender })
-      dispatch({ type: 'SET_ASSESSMENT_ANSWER', key: 'ageRange', value: mockedResult.ageRange })
-      dispatch({ type: 'SET_ASSESSMENT_ANSWER', key: 'primaryConcern', value: mockedResult.primaryConcern })
-      
-      // Auto-fill the sliders based on the face scan
-      dispatch({ 
-        type: 'UPDATE_ZONE_PARAMS', 
-        zone: state.configuration.activeZone, 
-        patch: mockedResult.recommendation
+      const response = await fetch('http://localhost:8000/api/analyze-face', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ image_base64: base64Data, zone: 'lips' }),
       })
       
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({ detail: 'Analysis failed' }))
+        throw new Error(errorData.detail || 'Face analysis failed')
+      }
+      
+      const result: AnalysisResult = await response.json()
+      
+      // 1. Store the full analysis result
+      dispatch({ type: 'ANALYSIS_SUCCESS', result })
+      
+      // 2. Auto-fill assessment answers from AI suggestions
+      if (result.suggested_answers) {
+        const answers = result.suggested_answers
+        if (answers.gender) dispatch({ type: 'SET_ASSESSMENT_ANSWER', key: 'gender', value: answers.gender })
+        if (answers.ageRange) dispatch({ type: 'SET_ASSESSMENT_ANSWER', key: 'ageRange', value: answers.ageRange })
+        if (answers.primaryConcern) dispatch({ type: 'SET_ASSESSMENT_ANSWER', key: 'primaryConcern', value: answers.primaryConcern })
+        if (answers.experience) dispatch({ type: 'SET_ASSESSMENT_ANSWER', key: 'experience', value: answers.experience })
+        if (answers.desiredOutcome) dispatch({ type: 'SET_ASSESSMENT_ANSWER', key: 'desiredOutcome', value: answers.desiredOutcome })
+        if (answers.lipShape) dispatch({ type: 'SET_ASSESSMENT_ANSWER', key: 'lipShape', value: answers.lipShape })
+        if (answers.symmetryConcern) dispatch({ type: 'SET_ASSESSMENT_ANSWER', key: 'symmetryConcern', value: answers.symmetryConcern })
+      }
+      
+      // 3. Auto-fill configuration sliders from AI suggestions
+      if (result.suggested_parameters) {
+        dispatch({ 
+          type: 'UPDATE_ZONE_PARAMS', 
+          zone: 'lips', 
+          patch: result.suggested_parameters 
+        })
+      }
+      
     } catch (e) {
-      console.error("Analysis failed", e)
+      const message = e instanceof Error ? e.message : 'Analysis failed'
+      console.error('Face analysis failed:', message)
+      dispatch({ type: 'ANALYSIS_ERROR', message })
     }
-  }, [state.photo.file, state.configuration.activeZone])
+  }, [state.photo.file])
+
+  /**
+   * Navigate to a step. When navigating to 'assessment', 
+   * automatically triggers face analysis if not already done.
+   */
+  const goToStepWithAnalysis = useCallback((step: WizardStep) => {
+    dispatch({ type: 'GO_TO_STEP', step })
+    
+    // Auto-trigger analysis when entering the assessment step for the first time
+    if (step === 'assessment' && state.photo.file && !state.assessment.analysisResult && !state.assessment.analysisLoading) {
+      // We need to trigger analysis after the step change.
+      // Since runAnalysis uses state.photo.file which is already set, we can call it.
+      setTimeout(() => {
+        // Dispatch will be called via the runAnalysis function
+      }, 0)
+    }
+  }, [state.photo.file, state.assessment.analysisResult, state.assessment.analysisLoading])
 
   const setActiveZone = useCallback((zone: TreatmentZone) => dispatch({ type: 'SET_ACTIVE_ZONE', zone }), [])
   const toggleZone = useCallback(
@@ -261,7 +324,7 @@ export function useSimulatorWizard() {
     canContinueFromPhoto,
     canContinueFromAssessment,
     hasEnabledZone,
-    goToStep,
+    goToStep: goToStepWithAnalysis,
     setPhoto,
     clearPhoto,
     setConsent,

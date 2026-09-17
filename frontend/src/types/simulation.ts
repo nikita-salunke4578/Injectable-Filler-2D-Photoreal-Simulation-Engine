@@ -4,6 +4,20 @@ export type AgeRange = '18-30' | '30-45' | '45-60' | '60+'
 
 export type FillerExperience = 'first-time' | 'maintenance' | 'correction'
 
+export type Gender = 'female' | 'male'
+
+export type PrimaryConcern = 
+  | 'long-upper-lip'
+  | 'thin-vermilion'
+  | 'downturned-corners'
+  | 'aging-rejuvenation'
+
+export type DesiredOutcome = 'natural' | 'glamorous' | 'dramatic'
+
+export type LipShapePreference = 'heart' | 'round' | 'wide' | 'current'
+
+export type SymmetryConcern = 'none' | 'mild' | 'significant'
+
 export type WizardStep = 'photo' | 'assessment' | 'configure' | 'preview'
 
 export interface StepDefinition {
@@ -19,34 +33,51 @@ export interface PatientPhotoState {
   captureMethod: 'upload' | 'camera' | null
 }
 
+export interface AnalysisMetrics {
+  upper_height_px: number
+  lower_height_px: number
+  current_ratio: number
+  ideal_ratio: number
+  lip_width_px: number
+  philtrum_length_px: number
+  vermilion_thickness: 'thin' | 'medium' | 'full'
+  symmetry_score: number
+  cupids_bow_definition: 'flat' | 'moderate' | 'defined'
+  mouth_corner_angle: number
+}
+
+export interface AnalysisSuggestedAnswers {
+  gender: Gender
+  ageRange: AgeRange
+  primaryConcern: PrimaryConcern
+  experience: FillerExperience
+  desiredOutcome: DesiredOutcome
+  lipShape: LipShapePreference
+  symmetryConcern: SymmetryConcern
+}
+
 export interface AnalysisResult {
-  metrics: {
-    upper_height_px: number
-    lower_height_px: number
-    current_ratio: number
-    ideal_ratio: number
-  }
+  metrics: AnalysisMetrics
   recommendation: {
     text: string
     suggested_volume_ml: number
     suggested_upper_lower_balance: number
   }
+  suggested_parameters: LipParameters
+  suggested_answers: AnalysisSuggestedAnswers
 }
-
-export type Gender = 'female' | 'male'
-
-export type PrimaryConcern = 
-  | 'long-upper-lip'
-  | 'thin-vermilion'
-  | 'downturned-corners'
-  | 'aging-rejuvenation'
 
 export interface AssessmentState {
   gender: Gender | null
   ageRange: AgeRange | null
   primaryConcern: PrimaryConcern | null
   experience: FillerExperience | null
+  desiredOutcome: DesiredOutcome | null
+  lipShape: LipShapePreference | null
+  symmetryConcern: SymmetryConcern | null
   analysisResult: AnalysisResult | null
+  analysisLoading: boolean
+  analysisError: string | null
 }
 
 export interface LipParameters {

@@ -5,7 +5,10 @@ import type {
   TreatmentZone,
   ZoneMeta,
   Gender,
-  PrimaryConcern
+  PrimaryConcern,
+  DesiredOutcome,
+  LipShapePreference,
+  SymmetryConcern
 } from '../types/simulation'
 
 export const WIZARD_STEPS: StepDefinition[] = [
@@ -44,6 +47,25 @@ export const EXPERIENCE_LEVELS: { id: FillerExperience; label: string; helper: s
   { id: 'first-time', label: 'First time', helper: 'Never had filler before' },
   { id: 'maintenance', label: 'Maintenance', helper: 'Regular filler patient' },
   { id: 'correction', label: 'Previous treatment', helper: 'Adjusting or correcting prior work' },
+]
+
+export const DESIRED_OUTCOMES: { id: DesiredOutcome; label: string; helper: string }[] = [
+  { id: 'natural', label: 'Natural', helper: 'Subtle enhancement, barely noticeable' },
+  { id: 'glamorous', label: 'Glamorous', helper: 'Noticeably fuller, photo-ready' },
+  { id: 'dramatic', label: 'Dramatic', helper: 'Bold transformation, maximum impact' },
+]
+
+export const LIP_SHAPES: { id: LipShapePreference; label: string; helper: string }[] = [
+  { id: 'heart', label: 'Heart', helper: 'Defined cupid\'s bow, tapered corners' },
+  { id: 'round', label: 'Round', helper: 'Soft, evenly full shape' },
+  { id: 'wide', label: 'Wide', helper: 'Horizontally broad with volume' },
+  { id: 'current', label: 'Keep Current', helper: 'Enhance without shape change' },
+]
+
+export const SYMMETRY_CONCERNS: { id: SymmetryConcern; label: string; helper: string }[] = [
+  { id: 'none', label: 'No Concern', helper: 'Lips appear symmetrical' },
+  { id: 'mild', label: 'Mild Asymmetry', helper: 'Slight unevenness' },
+  { id: 'significant', label: 'Significant Asymmetry', helper: 'Noticeable left-right difference' },
 ]
 
 export const ZONE_VOLUME_LIMITS: Record<TreatmentZone, number> = {
