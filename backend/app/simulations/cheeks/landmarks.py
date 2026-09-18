@@ -1,75 +1,126 @@
 """
-Cheek-specific landmark processing.
+Cheek-specific landmark extraction and anatomical mapping.
 
-Owner: Team Member
-
-This module is responsible only for identifying and processing
-landmarks required by the Cheeks simulation pipeline.
-
-Shared MediaPipe setup belongs in ``app.common.face_detection``.
-
-Key cheek landmarks (MediaPipe Face Mesh indices — approximate):
-    The cheek / midface region is generally defined by landmarks in
-    the zygomatic area.  Exact index selection is the responsibility
-    of the team member implementing this module.
-
-    Candidate landmark regions:
-        - Left cheek area: ~93, 132, 58, 172, 136, 150, 149, 176, 148
-        - Right cheek area: ~323, 361, 288, 397, 365, 379, 378, 400, 377
-        - Malar / zygomatic prominence can be approximated from the
-          midpoint of the cheek contour.
-
-    These indices are illustrative.  The implementer should validate
-    the exact MediaPipe mesh topology for cheek-region accuracy.
-
-Usage:
-    from app.simulations.cheeks.landmarks import extract_cheek_landmarks
+Defines MediaPipe indices for midface sub-zones (CK1, CK2, CK3),
+rigid anchor points, and tear trough / lower orbital exclusion cages.
 """
 
 from __future__ import annotations
 
-import logging
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+import numpy as np
 
-if TYPE_CHECKING:
-    from app.common.face_detection import FaceLandmarks
+CHEEK_LANDMARKS = {
+    "left": {
+        "lateral_ck1": [234, 127, 162],
+        "malar_ck2": [116,  123, 187],
+        "submalar_ck3": [205, 203, 206, 207],
+    },
+    "right": {
+        "lateral_ck1": [454, 356, 389],
+        "malar_ck2": [345,  352, 411],
+        "submalar_ck3": [425, 423, 426, 427],
+    },
+    "anchors": [
+        33,   # Left Eye Outer
+        133,  # Left Eye Inner
+        263,  # Right Eye Outer
+        362,  # Right Eye Inner
+        6,    # Nose Bridge
+        0,    # Upper Lip Center
+        152,  # Chin / Jaw Bottom
+    ],
+}
 
-logger = logging.getLogger(__name__)
+# Eyelid & Tear Trough Safety Cage indices (to prevent tear trough smudging)
+EYE_EXCLUSION_LANDMARKS = {
+    "left": [111, 117, 118, 119, 120, 121],
+    "right": [340, 346, 347, 348, 349, 350],
+}
+
+# Extra perimeter anchors to prevent displacement bleeding outside midface
+ADDITIONAL_ANCHORS = [
+    10,   # Forehead top center
+    67,   # Left eyebrow outer
+    297,  # Right eyebrow outer
+    2,    # Nose columella base
+    61,   # Mouth left corner
+    291,  # Mouth right corner
+    148,  # Left mandibular body
+    377,  # Right mandibular body
+    172,  # Left jaw angle
+    397,  # Right jaw angle
+]
 
 
 @dataclass
 class CheekLandmarks:
-    """Processed cheek-specific landmarks in pixel coordinates.
+    """Processed cheek-specific landmarks in pixel coordinates."""
 
-    Attributes:
-        left_contour: List of (x, y) points along the left cheek.
-        right_contour: List of (x, y) points along the right cheek.
-        left_center: Estimated centre of the left cheek volume.
-        right_center: Estimated centre of the right cheek volume.
+    left_ck1: np.ndarray
+    left_ck2: np.ndarray
+    left_ck3: np.ndarray
+    right_ck1: np.ndarray
+    right_ck2: np.ndarray
+    right_ck3: np.ndarray
+    anchors: np.ndarray
+    nose_bridge: np.ndarray
+    left_eye_exclusion: np.ndarray
+    right_eye_exclusion: np.ndarray
+    left_all: np.ndarray
+    right_all: np.ndarray
+    left_apex: np.ndarray
+    right_apex: np.ndarray
+
+
+def extract_cheek_landmarks(face_landmarks: np.ndarray) -> CheekLandmarks:
     """
-
-    left_contour: list[tuple[int, int]]
-    right_contour: list[tuple[int, int]]
-    left_center: tuple[int, int]
-    right_center: tuple[int, int]
-
-
-def extract_cheek_landmarks(face: "FaceLandmarks") -> CheekLandmarks | None:
-    """Extract cheek-specific landmarks from a full face mesh.
+    Extracts cheek-specific anatomical sub-zones, anchors, and exclusion points.
 
     Args:
-        face: Full face-mesh landmarks from the shared detector.
+        face_landmarks: (N, 2) numpy array of face landmarks in pixel coordinates (e.g. 468 or 478 points).
 
     Returns:
-        ``CheekLandmarks`` on success, ``None`` if required landmarks
-        are missing or below confidence threshold.
-
-    TODO:
-        - Select the appropriate MediaPipe indices for the cheek region.
-        - Convert from normalised to pixel coordinates.
-        - Calculate cheek centre points.
-        - Add confidence filtering.
+        CheekLandmarks dataclass instance containing all designated sub-zone arrays.
     """
-    logger.info("extract_cheek_landmarks called (placeholder — not yet implemented)")
-    return None
+    if len(face_landmarks) < 468:
+        raise ValueError(f"Insufficient face landmarks: expected at least 468, got {len(face_landmarks)}")
+
+    left_ck1 = face_landmarks[CHEEK_LANDMARKS["left"]["lateral_ck1"]]
+    left_ck2 = face_landmarks[CHEEK_LANDMARKS["left"]["malar_ck2"]]
+    left_ck3 = face_landmarks[CHEEK_LANDMARKS["left"]["submalar_ck3"]]
+
+    right_ck1 = face_landmarks[CHEEK_LANDMARKS["right"]["lateral_ck1"]]
+    right_ck2 = face_landmarks[CHEEK_LANDMARKS["right"]["malar_ck2"]]
+    right_ck3 = face_landmarks[CHEEK_LANDMARKS["right"]["submalar_ck3"]]
+
+    all_anchor_indices = CHEEK_LANDMARKS["anchors"] + ADDITIONAL_ANCHORS
+    anchors = face_landmarks[all_anchor_indices]
+
+    nose_bridge = face_landmarks[6]
+
+    left_eye_excl = face_landmarks[EYE_EXCLUSION_LANDMARKS["left"]]
+    right_eye_excl = face_landmarks[EYE_EXCLUSION_LANDMARKS["right"]]
+
+    left_all = np.vstack([left_ck1, left_ck2, left_ck3])
+    right_all = np.vstack([right_ck1, right_ck2, right_ck3])
+
+    left_apex = np.mean(left_ck2, axis=0)
+    right_apex = np.mean(right_ck2, axis=0)
+
+    return CheekLandmarks(
+        left_ck1=left_ck1,
+        left_ck2=left_ck2,
+        left_ck3=left_ck3,
+        right_ck1=right_ck1,
+        right_ck2=right_ck2,
+        right_ck3=right_ck3,
+        anchors=anchors,
+        nose_bridge=nose_bridge,
+        left_eye_exclusion=left_eye_excl,
+        right_eye_exclusion=right_eye_excl,
+        left_all=left_all,
+        right_all=right_all,
+        left_apex=left_apex,
+        right_apex=right_apex,
+    )

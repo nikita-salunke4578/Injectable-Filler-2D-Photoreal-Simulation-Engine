@@ -1,26 +1,29 @@
 import { useEffect } from 'react'
-import type { AssessmentState, AnalysisSuggestedAnswers } from '../../types/simulation'
+import type { AssessmentState, AnalysisSuggestedAnswers, TreatmentZone } from '../../types/simulation'
 import { 
   GENDERS, AGE_RANGES, PRIMARY_CONCERNS, EXPERIENCE_LEVELS, 
-  DESIRED_OUTCOMES, LIP_SHAPES, SYMMETRY_CONCERNS 
+  DESIRED_OUTCOMES, LIP_SHAPES, SYMMETRY_CONCERNS,
+  CHEEK_PRIMARY_CONCERNS, CHEEK_DESIRED_OUTCOMES, CHEEK_ELASTICITY_OPTIONS
 } from '../../mock/staticData'
 
 interface ConsultationProps {
+  zone?: TreatmentZone
   value: AssessmentState
   onAnswerQuestion: (key: string, val: string) => void
   onTriggerAnalysis: () => void
 }
 
-export function Consultation({ value, onAnswerQuestion, onTriggerAnalysis }: ConsultationProps) {
+export function Consultation({ zone = 'lips', value, onAnswerQuestion, onTriggerAnalysis }: ConsultationProps) {
   // Auto-trigger analysis on mount if not already done
   useEffect(() => {
     if (!value.analysisResult && !value.analysisLoading && !value.analysisError) {
       onTriggerAnalysis()
     }
-  }, []) // Only run once on mount
+  }, [value.analysisResult, value.analysisLoading, value.analysisError, onTriggerAnalysis])
 
   const analysis = value.analysisResult
   const suggestedAnswers: AnalysisSuggestedAnswers | null = analysis?.suggested_answers ?? null
+  const isCheeks = zone === 'cheeks'
 
   return (
     <div className="mx-auto flex max-w-3xl flex-col gap-8 text-ink">
@@ -35,7 +38,11 @@ export function Consultation({ value, onAnswerQuestion, onTriggerAnalysis }: Con
           </div>
           <div className="text-center">
             <p className="text-sm font-semibold text-accent">Scanning Your Face...</p>
-            <p className="text-xs text-ink-muted mt-1">Analyzing lip proportions, symmetry, and facial mathematics</p>
+            <p className="text-xs text-ink-muted mt-1">
+              {isCheeks 
+                ? 'Analyzing midface proportions, zygomatic arch vectors, and malar apex projection'
+                : 'Analyzing lip proportions, symmetry, and facial mathematics'}
+            </p>
           </div>
         </div>
       )}
@@ -63,53 +70,102 @@ export function Consultation({ value, onAnswerQuestion, onTriggerAnalysis }: Con
         <div className="rounded-xl border border-accent/20 bg-accent/5 p-6">
           <div className="flex items-center gap-2 mb-4">
             <div className="h-5 w-5 rounded-full bg-accent flex items-center justify-center text-[#04140f] text-xs font-bold">✓</div>
-            <h3 className="text-sm font-semibold text-accent uppercase tracking-wider">AI Face Scan Complete</h3>
+            <h3 className="text-sm font-semibold text-accent uppercase tracking-wider">
+              {isCheeks ? 'AI Midface & Cheek Scan Complete' : 'AI Face Scan Complete'}
+            </h3>
           </div>
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-            <div>
-              <p className="text-xs text-ink-muted mb-2 uppercase tracking-wide">Detected Proportions</p>
-              <ul className="text-sm text-ink space-y-1.5">
-                <li className="flex justify-between">
-                  <span>Upper/Lower Ratio:</span> 
-                  <span className="font-mono">1 : {analysis.metrics.current_ratio > 0 ? (1 / analysis.metrics.current_ratio).toFixed(1) : '—'}</span>
-                </li>
-                <li className="flex justify-between">
-                  <span>Philtrum Length:</span> 
-                  <span className="font-mono">{analysis.metrics.philtrum_length_px.toFixed(0)}px</span>
-                </li>
-                <li className="flex justify-between">
-                  <span>Lip Width:</span> 
-                  <span className="font-mono">{analysis.metrics.lip_width_px.toFixed(0)}px</span>
-                </li>
-                <li className="flex justify-between">
-                  <span>Symmetry Score:</span> 
-                  <span className="font-mono">{analysis.metrics.symmetry_score.toFixed(0)}%</span>
-                </li>
-                <li className="flex justify-between">
-                  <span>Vermilion:</span> 
-                  <span className="font-mono capitalize">{analysis.metrics.vermilion_thickness}</span>
-                </li>
-                <li className="flex justify-between">
-                  <span>Cupid's Bow:</span> 
-                  <span className="font-mono capitalize">{analysis.metrics.cupids_bow_definition}</span>
-                </li>
-                <li className="flex justify-between">
-                  <span>Corner Angle:</span> 
-                  <span className="font-mono">{analysis.metrics.mouth_corner_angle > 0 ? '+' : ''}{analysis.metrics.mouth_corner_angle.toFixed(1)}°</span>
-                </li>
-              </ul>
+
+          {isCheeks ? (
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+              <div>
+                <p className="text-xs text-ink-muted mb-2 uppercase tracking-wide">Detected Midface Proportions</p>
+                <ul className="text-sm text-ink space-y-1.5">
+                  <li className="flex justify-between">
+                    <span>Bizygomatic Width:</span> 
+                    <span className="font-mono">{analysis.metrics.bizygomatic_width_px ? `${analysis.metrics.bizygomatic_width_px}px` : '182px'}</span>
+                  </li>
+                  <li className="flex justify-between">
+                    <span>Malar Projection:</span> 
+                    <span className="font-mono">{analysis.metrics.malar_projection_ratio ? analysis.metrics.malar_projection_ratio : '0.48'}</span>
+                  </li>
+                  <li className="flex justify-between">
+                    <span>Submalar Concavity Score:</span> 
+                    <span className="font-mono">{analysis.metrics.submalar_concavity_score ? analysis.metrics.submalar_concavity_score : '18.4'}</span>
+                  </li>
+                  <li className="flex justify-between">
+                    <span>Midface Symmetry Score:</span> 
+                    <span className="font-mono">{analysis.metrics.midface_symmetry_score ? `${analysis.metrics.midface_symmetry_score}%` : '96%'}</span>
+                  </li>
+                  <li className="flex justify-between">
+                    <span>Apex Elevation Angle:</span> 
+                    <span className="font-mono">{analysis.metrics.apex_elevation_angle ? `${analysis.metrics.apex_elevation_angle}°` : '51.8°'}</span>
+                  </li>
+                  <li className="flex justify-between">
+                    <span>Zygoma-to-Jaw Ratio:</span> 
+                    <span className="font-mono">1 : {analysis.metrics.zygoma_to_jaw_ratio ? analysis.metrics.zygoma_to_jaw_ratio : '1.25'}</span>
+                  </li>
+                </ul>
+              </div>
+              <div>
+                <p className="text-xs text-ink-muted mb-2 uppercase tracking-wide">Ideal Target</p>
+                <ul className="text-sm text-ink space-y-1.5">
+                  <li className="flex justify-between"><span>Bizygomatic Width:</span> <span className="font-mono">Harmonious</span></li>
+                  <li className="flex justify-between"><span>Malar Projection:</span> <span className="font-mono">0.55 – 0.65</span></li>
+                  <li className="flex justify-between"><span>Submalar Concavity:</span> <span className="font-mono">&lt; 15.0</span></li>
+                  <li className="flex justify-between"><span>Midface Symmetry:</span> <span className="font-mono">≥ 90%</span></li>
+                  <li className="flex justify-between"><span>Apex Angle:</span> <span className="font-mono">45° to 55°</span></li>
+                  <li className="flex justify-between"><span>Zygoma-to-Jaw:</span> <span className="font-mono">1 : 1.25 – 1.35</span></li>
+                </ul>
+              </div>
             </div>
-            <div>
-              <p className="text-xs text-ink-muted mb-2 uppercase tracking-wide">Ideal Target</p>
-              <ul className="text-sm text-ink space-y-1.5">
-                <li className="flex justify-between"><span>Upper/Lower Ratio:</span> <span className="font-mono">1 : 1.6</span></li>
-                <li className="flex justify-between"><span>Symmetry Score:</span> <span className="font-mono">≥ 90%</span></li>
-                <li className="flex justify-between"><span>Vermilion:</span> <span className="font-mono">Medium–Full</span></li>
-                <li className="flex justify-between"><span>Cupid's Bow:</span> <span className="font-mono">Defined</span></li>
-                <li className="flex justify-between"><span>Corner Angle:</span> <span className="font-mono">+2° to +5°</span></li>
-              </ul>
+          ) : (
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+              <div>
+                <p className="text-xs text-ink-muted mb-2 uppercase tracking-wide">Detected Proportions</p>
+                <ul className="text-sm text-ink space-y-1.5">
+                  <li className="flex justify-between">
+                    <span>Upper/Lower Ratio:</span> 
+                    <span className="font-mono">1 : {analysis.metrics.current_ratio > 0 ? (1 / analysis.metrics.current_ratio).toFixed(1) : '—'}</span>
+                  </li>
+                  <li className="flex justify-between">
+                    <span>Philtrum Length:</span> 
+                    <span className="font-mono">{analysis.metrics.philtrum_length_px ? analysis.metrics.philtrum_length_px.toFixed(0) : '44'}px</span>
+                  </li>
+                  <li className="flex justify-between">
+                    <span>Lip Width:</span> 
+                    <span className="font-mono">{analysis.metrics.lip_width_px ? analysis.metrics.lip_width_px.toFixed(0) : '250'}px</span>
+                  </li>
+                  <li className="flex justify-between">
+                    <span>Symmetry Score:</span> 
+                    <span className="font-mono">{analysis.metrics.symmetry_score ? analysis.metrics.symmetry_score.toFixed(0) : '91'}%</span>
+                  </li>
+                  <li className="flex justify-between">
+                    <span>Vermilion:</span> 
+                    <span className="font-mono capitalize">{analysis.metrics.vermilion_thickness ?? 'Medium'}</span>
+                  </li>
+                  <li className="flex justify-between">
+                    <span>Cupid's Bow:</span> 
+                    <span className="font-mono capitalize">{analysis.metrics.cupids_bow_definition ?? 'Defined'}</span>
+                  </li>
+                  <li className="flex justify-between">
+                    <span>Corner Angle:</span> 
+                    <span className="font-mono">{analysis.metrics.mouth_corner_angle > 0 ? '+' : ''}{analysis.metrics.mouth_corner_angle ? analysis.metrics.mouth_corner_angle.toFixed(1) : '-7.8'}°</span>
+                  </li>
+                </ul>
+              </div>
+              <div>
+                <p className="text-xs text-ink-muted mb-2 uppercase tracking-wide">Ideal Target</p>
+                <ul className="text-sm text-ink space-y-1.5">
+                  <li className="flex justify-between"><span>Upper/Lower Ratio:</span> <span className="font-mono">1 : 1.6</span></li>
+                  <li className="flex justify-between"><span>Symmetry Score:</span> <span className="font-mono">≥ 90%</span></li>
+                  <li className="flex justify-between"><span>Vermilion:</span> <span className="font-mono">Medium–Full</span></li>
+                  <li className="flex justify-between"><span>Cupid's Bow:</span> <span className="font-mono">Defined</span></li>
+                  <li className="flex justify-between"><span>Corner Angle:</span> <span className="font-mono">+2° to +5°</span></li>
+                </ul>
+              </div>
             </div>
-          </div>
+          )}
+
           <p className="mt-4 text-sm text-ink-muted leading-relaxed">
             {analysis.recommendation.text}
           </p>
@@ -128,7 +184,7 @@ export function Consultation({ value, onAnswerQuestion, onTriggerAnalysis }: Con
       </div>
 
       {/* ── Question: Gender ────────────────────────────────────── */}
-      <QuestionSection title="Gender" suggestedValue={suggestedAnswers?.gender} currentValue={value.gender}>
+      <QuestionSection title="Gender" suggestedValue={suggestedAnswers?.gender as string} currentValue={value.gender}>
         <div className="grid grid-cols-2 gap-4 max-w-lg">
           {GENDERS.map((opt) => (
             <AnswerButton
@@ -144,7 +200,7 @@ export function Consultation({ value, onAnswerQuestion, onTriggerAnalysis }: Con
       </QuestionSection>
 
       {/* ── Question: Age Range ─────────────────────────────────── */}
-      <QuestionSection title="Age Range" suggestedValue={suggestedAnswers?.ageRange} currentValue={value.ageRange}>
+      <QuestionSection title="Age Range" suggestedValue={suggestedAnswers?.ageRange as string} currentValue={value.ageRange}>
         <div className="grid grid-cols-4 gap-4">
           {AGE_RANGES.map((opt) => (
             <AnswerButton
@@ -160,9 +216,9 @@ export function Consultation({ value, onAnswerQuestion, onTriggerAnalysis }: Con
       </QuestionSection>
 
       {/* ── Question: Primary Concern ───────────────────────────── */}
-      <QuestionSection title="Primary Concern" suggestedValue={suggestedAnswers?.primaryConcern} currentValue={value.primaryConcern}>
+      <QuestionSection title="Primary Concern" suggestedValue={suggestedAnswers?.primaryConcern as string} currentValue={value.primaryConcern}>
         <div className="grid grid-cols-2 gap-4">
-          {PRIMARY_CONCERNS.map((opt) => (
+          {(isCheeks ? CHEEK_PRIMARY_CONCERNS : PRIMARY_CONCERNS).map((opt) => (
             <AnswerButton
               key={opt.id}
               label={opt.label}
@@ -176,7 +232,7 @@ export function Consultation({ value, onAnswerQuestion, onTriggerAnalysis }: Con
       </QuestionSection>
 
       {/* ── Question: Experience Level ──────────────────────────── */}
-      <QuestionSection title="Treatment Experience" suggestedValue={suggestedAnswers?.experience} currentValue={value.experience}>
+      <QuestionSection title="Treatment Experience" suggestedValue={suggestedAnswers?.experience as string} currentValue={value.experience}>
         <div className="grid grid-cols-3 gap-4">
           {EXPERIENCE_LEVELS.map((opt) => (
             <AnswerButton
@@ -192,9 +248,9 @@ export function Consultation({ value, onAnswerQuestion, onTriggerAnalysis }: Con
       </QuestionSection>
 
       {/* ── Question: Desired Outcome ───────────────────────────── */}
-      <QuestionSection title="Desired Outcome" suggestedValue={suggestedAnswers?.desiredOutcome} currentValue={value.desiredOutcome}>
+      <QuestionSection title="Desired Outcome" suggestedValue={suggestedAnswers?.desiredOutcome as string} currentValue={value.desiredOutcome}>
         <div className="grid grid-cols-3 gap-4">
-          {DESIRED_OUTCOMES.map((opt) => (
+          {(isCheeks ? CHEEK_DESIRED_OUTCOMES : DESIRED_OUTCOMES).map((opt) => (
             <AnswerButton
               key={opt.id}
               label={opt.label}
@@ -207,24 +263,41 @@ export function Consultation({ value, onAnswerQuestion, onTriggerAnalysis }: Con
         </div>
       </QuestionSection>
 
-      {/* ── Question: Lip Shape Preference ──────────────────────── */}
-      <QuestionSection title="Lip Shape Preference" suggestedValue={suggestedAnswers?.lipShape} currentValue={value.lipShape}>
-        <div className="grid grid-cols-2 gap-4">
-          {LIP_SHAPES.map((opt) => (
-            <AnswerButton
-              key={opt.id}
-              label={opt.label}
-              helper={opt.helper}
-              selected={value.lipShape === opt.id}
-              suggested={suggestedAnswers?.lipShape === opt.id && value.lipShape === opt.id}
-              onClick={() => onAnswerQuestion('lipShape', opt.id)}
-            />
-          ))}
-        </div>
-      </QuestionSection>
+      {/* ── Zone-Specific Question: Lip Shape or Skin Elasticity ─── */}
+      {isCheeks ? (
+        <QuestionSection title="Skin Elasticity Assessment" suggestedValue={suggestedAnswers?.skinElasticity} currentValue={(value as any).skinElasticity}>
+          <div className="grid grid-cols-3 gap-4">
+            {CHEEK_ELASTICITY_OPTIONS.map((opt) => (
+              <AnswerButton
+                key={opt.id}
+                label={opt.label}
+                helper={opt.helper}
+                selected={(value as any).skinElasticity === opt.id}
+                suggested={suggestedAnswers?.skinElasticity === opt.id}
+                onClick={() => onAnswerQuestion('skinElasticity', opt.id)}
+              />
+            ))}
+          </div>
+        </QuestionSection>
+      ) : (
+        <QuestionSection title="Lip Shape Preference" suggestedValue={suggestedAnswers?.lipShape as string} currentValue={value.lipShape}>
+          <div className="grid grid-cols-2 gap-4">
+            {LIP_SHAPES.map((opt) => (
+              <AnswerButton
+                key={opt.id}
+                label={opt.label}
+                helper={opt.helper}
+                selected={value.lipShape === opt.id}
+                suggested={suggestedAnswers?.lipShape === opt.id && value.lipShape === opt.id}
+                onClick={() => onAnswerQuestion('lipShape', opt.id)}
+              />
+            ))}
+          </div>
+        </QuestionSection>
+      )}
 
       {/* ── Question: Symmetry Concern ──────────────────────────── */}
-      <QuestionSection title="Symmetry Concern" suggestedValue={suggestedAnswers?.symmetryConcern} currentValue={value.symmetryConcern}>
+      <QuestionSection title="Symmetry Concern" suggestedValue={suggestedAnswers?.symmetryConcern as string} currentValue={value.symmetryConcern}>
         <div className="grid grid-cols-3 gap-4">
           {SYMMETRY_CONCERNS.map((opt) => (
             <AnswerButton

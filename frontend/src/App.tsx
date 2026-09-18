@@ -32,7 +32,10 @@ function App() {
       />
 
       {showSimulator ? (
-        <DermalFillerSimulator onBack={handleBackFromSimulator} />
+        <DermalFillerSimulator
+          initialZone={activeSection !== 'overview' ? activeSection : 'lips'}
+          onBack={handleBackFromSimulator}
+        />
       ) : activeSection === 'overview' ? (
         <OverviewDashboard onNavigateToRegion={(zone: TreatmentZone) => setActiveSection(zone)} />
       ) : (

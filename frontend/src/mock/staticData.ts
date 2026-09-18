@@ -55,6 +55,25 @@ export const DESIRED_OUTCOMES: { id: DesiredOutcome; label: string; helper: stri
   { id: 'dramatic', label: 'Dramatic', helper: 'Bold transformation, maximum impact' },
 ]
 
+export const CHEEK_PRIMARY_CONCERNS = [
+  { id: 'flat-malar', label: 'Flat Cheekbones', helper: 'Lack of forward projection at malar apex' },
+  { id: 'submalar-hollow', label: 'Gaunt Midface Hollows', helper: 'Depression beneath zygomatic bone' },
+  { id: 'midface-sagging', label: 'Midface Laxity & Volume Loss', helper: 'Loss of lateral lift and youthful apex' },
+  { id: 'cheek-asymmetry', label: 'Cheek Asymmetry', helper: 'Uneven volume between left and right' },
+]
+
+export const CHEEK_DESIRED_OUTCOMES = [
+  { id: 'contour', label: 'High Cheekbone Contour', helper: 'Sculpted lateral lift & defined apex' },
+  { id: 'natural', label: 'Natural Midface Volume', helper: 'Balanced, youthful softness' },
+  { id: 'dramatic', label: 'Model Zygomatic Lift', helper: 'Bold lateral sweep towards hairline' },
+]
+
+export const CHEEK_ELASTICITY_OPTIONS = [
+  { id: 'tight', label: 'Firm / Young (0.9x)', helper: 'High skin elasticity, localized lift' },
+  { id: 'normal', label: 'Standard (1.0x)', helper: 'Balanced elasticity and dispersion' },
+  { id: 'lax', label: 'Mature / Lax (1.15x)', helper: 'Soft tissue with wider volume spread' },
+]
+
 export const LIP_SHAPES: { id: LipShapePreference; label: string; helper: string }[] = [
   { id: 'heart', label: 'Heart', helper: 'Defined cupid\'s bow, tapered corners' },
   { id: 'round', label: 'Round', helper: 'Soft, evenly full shape' },

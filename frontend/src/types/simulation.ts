@@ -46,24 +46,35 @@ export interface AnalysisMetrics {
   mouth_corner_angle: number
 }
 
+export interface CheekAnalysisMetrics {
+  bizygomatic_width_px: number
+  malar_projection_ratio: number
+  submalar_concavity_score: number
+  midface_symmetry_score: number
+  apex_elevation_angle: number
+  zygoma_to_jaw_ratio: number
+}
+
 export interface AnalysisSuggestedAnswers {
-  gender: Gender
-  ageRange: AgeRange
-  primaryConcern: PrimaryConcern
-  experience: FillerExperience
-  desiredOutcome: DesiredOutcome
-  lipShape: LipShapePreference
-  symmetryConcern: SymmetryConcern
+  gender?: Gender | string
+  ageRange?: AgeRange | string
+  primaryConcern?: PrimaryConcern | string
+  experience?: FillerExperience | string
+  desiredOutcome?: DesiredOutcome | string
+  lipShape?: LipShapePreference | string
+  skinElasticity?: string
+  symmetryConcern?: SymmetryConcern | string
 }
 
 export interface AnalysisResult {
-  metrics: AnalysisMetrics
+  zone?: TreatmentZone
+  metrics: (AnalysisMetrics & Partial<CheekAnalysisMetrics>) | (CheekAnalysisMetrics & Partial<AnalysisMetrics>) | Record<string, any>
   recommendation: {
     text: string
     suggested_volume_ml: number
-    suggested_upper_lower_balance: number
+    suggested_upper_lower_balance?: number
   }
-  suggested_parameters: LipParameters
+  suggested_parameters: LipParameters | CheekParameters | Record<string, any>
   suggested_answers: AnalysisSuggestedAnswers
 }
 
@@ -91,8 +102,15 @@ export interface LipParameters {
 export type CheekSide = 'left' | 'right' | 'bilateral'
 
 export interface CheekParameters {
-  volumeMl: number
-  side: CheekSide
+  lateral_volume_ck1: number // 0.0 to 2.5 mL
+  medial_volume_ck2: number // 0.0 to 2.5 mL
+  submalar_volume_ck3: number // 0.0 to 2.0 mL
+  asymmetry_mode: boolean
+  left_cheek_multiplier: number // 0.0 to 2.0
+  right_cheek_multiplier: number // 0.0 to 2.0
+  skin_elasticity: number // 0.8 to 1.2
+  volumeMl?: number
+  side?: CheekSide
 }
 
 export interface JawParameters {

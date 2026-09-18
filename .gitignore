@@ -1,8 +1,23 @@
 # Dependencies
 node_modules/
+backend/venv/
+venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.python-version
+
+# Python tooling
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+coverage/
+.vite/
 
 # Production builds
 dist/
+build/
 
 # Local environment and secrets
 .env
@@ -16,10 +31,6 @@ yarn-debug.log*
 yarn-error.log*
 pnpm-debug.log*
 
-# Coverage and tooling output
-coverage/
-.vite/
-
 # Editor files
 .vscode/*
 !.vscode/extensions.json
@@ -30,6 +41,38 @@ coverage/
 .DS_Store
 Thumbs.db
 
+# Local/generated media artifacts
+*.jpg
+*.jpeg
+*.png
+*.gif
+*.webp
+*.bmp
+*.tif
+*.tiff
+backend/*.jpg
+backend/*.jpeg
+backend/*.png
+backend/*.gif
+backend/*.webp
+backend/*.bmp
+backend/*.tif
+backend/*.tiff
+
+# Experiment/debug output folders/files
+backend/debug_*.jpg
+backend/debug_*.png
+backend/test_*.jpg
+backend/test_*.png
+backend/*_result.jpg
+backend/*_output.jpg
+backend/*_after.jpg
+backend/*_before.jpg
+backend/*_mask.jpg
+backend/*_deformed.jpg
+backend/*_refined.jpg
+
+# Local env variables
 CLOUDINARY_CLOUD_NAME=
 CLOUDINARY_API_KEY=
 CLOUDINARY_API_SECRET=

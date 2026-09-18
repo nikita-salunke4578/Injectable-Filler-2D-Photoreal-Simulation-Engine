@@ -10,6 +10,10 @@ export function getActiveZones(config: ConfigurationState) {
 export function getTotalVolume(config: ConfigurationState): number {
   return getActiveZones(config).reduce((sum, zone) => {
     const params = config.parameters[zone.id] as any
+    if (zone.id === 'cheeks') {
+      const cheekVol = (params.lateral_volume_ck1 || 0) + (params.medial_volume_ck2 || 0) + (params.submalar_volume_ck3 || 0)
+      return sum + cheekVol
+    }
     return sum + (params.volumeMl || 0)
   }, 0)
 }

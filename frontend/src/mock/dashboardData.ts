@@ -60,7 +60,7 @@ export const REGION_INFO: Record<TreatmentZone, RegionInfo> = {
     description:
       'Simulates midface volume enhancement for cheek contouring. Supports bilateral and unilateral treatment with controlled deformation.',
     owner: 'Team Member',
-    status: 'Under Development',
+    status: 'In Development',
     features: [
       'Cheek volume parameter (0–4.0 mL)',
       'Side selection (left / right / bilateral)',

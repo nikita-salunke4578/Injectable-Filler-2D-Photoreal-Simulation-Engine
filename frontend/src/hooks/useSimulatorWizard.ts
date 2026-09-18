@@ -25,34 +25,46 @@ interface WizardState {
 
 const DEFAULT_PARAMETERS: ZoneParameterMap = {
   lips: { philtralShortening: 0, vermilionShow: 0, cupidsBow: 0, philtralColumn: 0, dentalShow: 0 },
-  cheeks: { volumeMl: 0, side: 'bilateral' },
+  cheeks: {
+    lateral_volume_ck1: 1.8,
+    medial_volume_ck2: 1.2,
+    submalar_volume_ck3: 0.2,
+    asymmetry_mode: false,
+    left_cheek_multiplier: 1.0,
+    right_cheek_multiplier: 1.0,
+    skin_elasticity: 1.0,
+    volumeMl: 3.2,
+    side: 'bilateral',
+  },
   jaw: { volumeMl: 0, definition: 0 },
 }
 
-const initialState: WizardState = {
-  step: 'photo',
-  photo: { file: null, previewUrl: null, consentGiven: false, captureMethod: null },
-  assessment: { 
-    gender: null,
-    ageRange: null, 
-    primaryConcern: null, 
-    experience: null, 
-    desiredOutcome: null,
-    lipShape: null,
-    symmetryConcern: null,
-    analysisResult: null,
-    analysisLoading: false,
-    analysisError: null,
-  },
-  configuration: {
-    activeZone: 'lips',
-    enabledZones: { lips: true, cheeks: false, jaw: false },
-    parameters: DEFAULT_PARAMETERS,
-    showOutline: false,
-  },
-  simulationStatus: 'idle',
-  simulationError: null,
-  result: null,
+function createInitialState(initialZone: TreatmentZone = 'lips'): WizardState {
+  return {
+    step: 'photo',
+    photo: { file: null, previewUrl: null, consentGiven: false, captureMethod: null },
+    assessment: { 
+      gender: null,
+      ageRange: null, 
+      primaryConcern: null, 
+      experience: null, 
+      desiredOutcome: null,
+      lipShape: null,
+      symmetryConcern: null,
+      analysisResult: null,
+      analysisLoading: false,
+      analysisError: null,
+    },
+    configuration: {
+      activeZone: initialZone,
+      enabledZones: { lips: initialZone === 'lips', cheeks: initialZone === 'cheeks', jaw: initialZone === 'jaw' },
+      parameters: DEFAULT_PARAMETERS,
+      showOutline: false,
+    },
+    simulationStatus: 'idle',
+    simulationError: null,
+    result: null,
+  }
 }
 
 type Action =
@@ -91,7 +103,7 @@ function reducer(state: WizardState, action: Action): WizardState {
         },
       }
     case 'CLEAR_PHOTO':
-      return { ...state, photo: { ...initialState.photo } }
+      return { ...state, photo: { file: null, previewUrl: null, consentGiven: false, captureMethod: null } }
     case 'SET_CONSENT':
       return { ...state, photo: { ...state.photo, consentGiven: action.value } }
     case 'SET_ASSESSMENT': {
@@ -164,7 +176,7 @@ function reducer(state: WizardState, action: Action): WizardState {
     case 'SIMULATION_ERROR':
       return { ...state, simulationStatus: 'error', simulationError: action.message }
     case 'START_OVER':
-      return { ...initialState }
+      return createInitialState()
     default:
       return state
   }
@@ -180,8 +192,8 @@ async function fileToBase64(file: File): Promise<string> {
   })
 }
 
-export function useSimulatorWizard() {
-  const [state, dispatch] = useReducer(reducer, initialState)
+export function useSimulatorWizard(initialZone: TreatmentZone = 'lips') {
+  const [state, dispatch] = useReducer(reducer, initialZone, createInitialState)
 
   const currentStepIndex = useMemo(
     () => WIZARD_STEPS.findIndex((s) => s.id === state.step),
@@ -196,8 +208,6 @@ export function useSimulatorWizard() {
     !state.assessment.analysisLoading
   )
   const hasEnabledZone = Object.values(state.configuration.enabledZones).some(Boolean)
-
-  const goToStep = useCallback((step: WizardStep) => dispatch({ type: 'GO_TO_STEP', step }), [])
 
   const setPhoto = useCallback(
     (file: File, previewUrl: string, method: 'upload' | 'camera') =>
@@ -219,7 +229,7 @@ export function useSimulatorWizard() {
 
   /**
    * Calls the real /api/analyze-face endpoint to scan the uploaded face,
-   * compute lip mathematics, and auto-fill assessment answers + config sliders.
+   * compute zone mathematics, and auto-fill assessment answers + config sliders.
    */
   const runAnalysis = useCallback(async () => {
     if (!state.photo.file) return
@@ -228,11 +238,12 @@ export function useSimulatorWizard() {
     
     try {
       const base64Data = await fileToBase64(state.photo.file)
+      const currentZone = state.configuration.activeZone
       
       const response = await fetch('http://localhost:8000/api/analyze-face', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ image_base64: base64Data, zone: 'lips' }),
+        body: JSON.stringify({ image_base64: base64Data, zone: currentZone }),
       })
       
       if (!response.ok) {
@@ -248,21 +259,22 @@ export function useSimulatorWizard() {
       // 2. Auto-fill assessment answers from AI suggestions
       if (result.suggested_answers) {
         const answers = result.suggested_answers
-        if (answers.gender) dispatch({ type: 'SET_ASSESSMENT_ANSWER', key: 'gender', value: answers.gender })
-        if (answers.ageRange) dispatch({ type: 'SET_ASSESSMENT_ANSWER', key: 'ageRange', value: answers.ageRange })
-        if (answers.primaryConcern) dispatch({ type: 'SET_ASSESSMENT_ANSWER', key: 'primaryConcern', value: answers.primaryConcern })
-        if (answers.experience) dispatch({ type: 'SET_ASSESSMENT_ANSWER', key: 'experience', value: answers.experience })
-        if (answers.desiredOutcome) dispatch({ type: 'SET_ASSESSMENT_ANSWER', key: 'desiredOutcome', value: answers.desiredOutcome })
-        if (answers.lipShape) dispatch({ type: 'SET_ASSESSMENT_ANSWER', key: 'lipShape', value: answers.lipShape })
-        if (answers.symmetryConcern) dispatch({ type: 'SET_ASSESSMENT_ANSWER', key: 'symmetryConcern', value: answers.symmetryConcern })
+        if (answers.gender) dispatch({ type: 'SET_ASSESSMENT_ANSWER', key: 'gender', value: String(answers.gender) })
+        if (answers.ageRange) dispatch({ type: 'SET_ASSESSMENT_ANSWER', key: 'ageRange', value: String(answers.ageRange) })
+        if (answers.primaryConcern) dispatch({ type: 'SET_ASSESSMENT_ANSWER', key: 'primaryConcern', value: String(answers.primaryConcern) })
+        if (answers.experience) dispatch({ type: 'SET_ASSESSMENT_ANSWER', key: 'experience', value: String(answers.experience) })
+        if (answers.desiredOutcome) dispatch({ type: 'SET_ASSESSMENT_ANSWER', key: 'desiredOutcome', value: String(answers.desiredOutcome) })
+        if (answers.lipShape) dispatch({ type: 'SET_ASSESSMENT_ANSWER', key: 'lipShape', value: String(answers.lipShape) })
+        if (answers.skinElasticity) dispatch({ type: 'SET_ASSESSMENT_ANSWER', key: 'skinElasticity', value: String(answers.skinElasticity) })
+        if (answers.symmetryConcern) dispatch({ type: 'SET_ASSESSMENT_ANSWER', key: 'symmetryConcern', value: String(answers.symmetryConcern) })
       }
       
-      // 3. Auto-fill configuration sliders from AI suggestions
+      // 3. Auto-fill configuration sliders from AI suggestions for currentZone
       if (result.suggested_parameters) {
         dispatch({ 
           type: 'UPDATE_ZONE_PARAMS', 
-          zone: 'lips', 
-          patch: result.suggested_parameters 
+          zone: currentZone, 
+          patch: result.suggested_parameters as unknown as Record<string, unknown>, 
         })
       }
       
@@ -271,7 +283,7 @@ export function useSimulatorWizard() {
       console.error('Face analysis failed:', message)
       dispatch({ type: 'ANALYSIS_ERROR', message })
     }
-  }, [state.photo.file])
+  }, [state.photo.file, state.configuration.activeZone])
 
   /**
    * Navigate to a step. When navigating to 'assessment', 

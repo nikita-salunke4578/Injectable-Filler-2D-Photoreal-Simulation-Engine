@@ -11,6 +11,9 @@ function buildRequestPayload(config: ConfigurationState): SimulationRequestPaylo
       const p = params as any
       const intensity = (p.philtralShortening + p.vermilionShow + p.cupidsBow) / 300
       volume = Math.max(1.0, Number((intensity * 5).toFixed(1))) // 1.0 to 5.0 volume equivalent for cost calc
+    } else if (zone.id === 'cheeks') {
+      const p = params as any
+      volume = Number(((p.lateral_volume_ck1 ?? 0) + (p.medial_volume_ck2 ?? 0) + (p.submalar_volume_ck3 ?? 0)).toFixed(2))
     } else {
       volume = Number((params as any).volumeMl || 0)
     }

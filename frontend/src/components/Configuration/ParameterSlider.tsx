@@ -24,13 +24,16 @@ export function ParameterSlider({
   onReset,
 }: ParameterSliderProps) {
   const percent = Math.round(((value - min) / (max - min)) * 100)
+  const displayValue = unit === '%' 
+    ? `${percent}%` 
+    : `${step < 0.1 ? value.toFixed(2) : value.toFixed(1)} ${unit}`
 
   return (
     <div className={disabled ? 'opacity-50' : undefined}>
       <div className="mb-2 flex items-center justify-between">
         <label className="text-sm text-ink">{label}</label>
         <div className="flex items-center gap-2">
-          <span className="text-sm tabular-nums text-ink-muted">{percent}%</span>
+          <span className="text-sm tabular-nums text-ink-muted">{displayValue}</span>
           {onReset && (
             <button
               type="button"

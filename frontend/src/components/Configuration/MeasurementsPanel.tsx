@@ -22,9 +22,13 @@ export function MeasurementsPanel({ configuration }: { configuration: Configurat
         <div className="mt-4 border-t border-border pt-3">
           <p className="mb-2 text-xs font-semibold tracking-wide text-ink-faint">PER-ZONE VOLUME</p>
           <dl className="flex flex-col gap-1.5">
-            {activeZones.map((zone) => (
-              <Row key={zone.id} label={zone.label} value={formatMl((configuration.parameters[zone.id] as any).volumeMl || 0)} />
-            ))}
+            {activeZones.map((zone) => {
+              const params = configuration.parameters[zone.id] as any
+              const vol = zone.id === 'cheeks'
+                ? ((params.lateral_volume_ck1 || 0) + (params.medial_volume_ck2 || 0) + (params.submalar_volume_ck3 || 0))
+                : (params.volumeMl || 0)
+              return <Row key={zone.id} label={zone.label} value={formatMl(vol)} />
+            })}
           </dl>
         </div>
       )}

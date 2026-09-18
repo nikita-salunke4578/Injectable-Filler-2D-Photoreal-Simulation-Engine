@@ -10,14 +10,15 @@ import { Configuration, ConfigurationFooter } from '../../components/Configurati
 import { SimulationPreview } from '../../components/SimulationPreview/SimulationPreview'
 import { useSimulatorWizard } from '../../hooks/useSimulatorWizard'
 import { WIZARD_STEPS } from '../../mock/staticData'
-import type { WizardStep } from '../../types/simulation'
+import type { TreatmentZone, WizardStep } from '../../types/simulation'
 
 interface DermalFillerSimulatorProps {
+  initialZone?: TreatmentZone
   onBack?: () => void
 }
 
-export function DermalFillerSimulator({ onBack }: DermalFillerSimulatorProps) {
-  const wizard = useSimulatorWizard()
+export function DermalFillerSimulator({ initialZone = 'lips', onBack }: DermalFillerSimulatorProps) {
+  const wizard = useSimulatorWizard(initialZone)
   const [showDoseOverlay, setShowDoseOverlay] = useState(true)
   const { state } = wizard
 
@@ -81,6 +82,7 @@ export function DermalFillerSimulator({ onBack }: DermalFillerSimulatorProps) {
         {state.step === 'assessment' && (
           <>
             <Consultation 
+              zone={state.configuration.activeZone}
               value={state.assessment} 
               onAnswerQuestion={wizard.setAssessmentAnswer}
               onTriggerAnalysis={wizard.runAnalysis}

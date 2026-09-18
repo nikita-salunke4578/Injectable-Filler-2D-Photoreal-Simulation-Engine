@@ -44,6 +44,27 @@ class ZoneSimulationRequest(BaseModel):
     )
 
 
+class CheekParameters(BaseModel):
+    """Specific input parameters for cheek simulation."""
+
+    lateral_volume_ck1: float = Field(default=1.0, ge=0.0, le=2.5, description="Lateral zygomatic volume (mL)")
+    medial_volume_ck2: float = Field(default=0.5, ge=0.0, le=2.5, description="Malar apex volume (mL)")
+    submalar_volume_ck3: float = Field(default=0.0, ge=0.0, le=2.0, description="Submalar hollow volume (mL)")
+    asymmetry_mode: bool = Field(default=False, description="Enable independent left/right cheek multipliers")
+    left_cheek_multiplier: float = Field(default=1.0, ge=0.0, le=2.0, description="Multiplier for left cheek volume")
+    right_cheek_multiplier: float = Field(default=1.0, ge=0.0, le=2.0, description="Multiplier for right cheek volume")
+    skin_elasticity: float = Field(default=1.0, ge=0.8, le=1.2, description="Skin elasticity spread factor")
+
+
+class CheekSimulationRequest(BaseModel):
+    """Direct request payload for /api/simulations/cheeks."""
+
+    zone: str = Field(default="cheeks")
+    image_base64: str = Field(description="Base64 encoded image data string")
+    parameters: CheekParameters = Field(default_factory=CheekParameters)
+    show_outline: bool = Field(default=False, description="Whether to draw cheek contour overlay")
+
+
 class SimulationRequest(BaseModel):
     """
     Top-level simulation request sent by the frontend.

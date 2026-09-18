@@ -9,7 +9,7 @@ interface PresetGridProps {
 
 export function PresetGrid({ activePresetId, onApply }: PresetGridProps) {
   const activePreset = CONFIGURATION_PRESETS.find((p) => p.id === activePresetId)
-  const highlighted = activePreset ?? CONFIGURATION_PRESETS.find((p) => p.recommended)!
+  const highlighted = activePreset ?? CONFIGURATION_PRESETS.find((p) => p.recommended) ?? CONFIGURATION_PRESETS[0]
 
   return (
     <div className="flex flex-col gap-4">

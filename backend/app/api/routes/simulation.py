@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter, HTTPException
 
-from app.common.schemas import SimulationRequest
+from app.common.schemas import CheekSimulationRequest, SimulationRequest
 from app.services.simulation_service import SimulationService
 
 router = APIRouter(prefix="/api", tags=["simulation"])
@@ -44,4 +44,24 @@ async def run_simulation(request: SimulationRequest) -> dict:
         raise HTTPException(
             status_code=500,
             detail=f"Simulation failed: {exc}",
+        ) from exc
+
+
+@router.post("/simulations/cheeks")
+async def run_cheek_simulation(request: CheekSimulationRequest) -> dict:
+    """Submit a dedicated cheeks simulation request.
+
+    Args:
+        request: Validated ``CheekSimulationRequest`` body with structured parameters.
+
+    Returns:
+        Simulation dictionary with before/after base64 images and metadata.
+    """
+    try:
+        result = await _service.run_cheek_simulation(request)
+        return result
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Cheek simulation failed: {exc}",
         ) from exc

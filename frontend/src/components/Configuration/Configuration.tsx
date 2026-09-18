@@ -1,3 +1,4 @@
+import { ZoneTabs } from './ZoneTabs'
 import { ZoneParameterPanel } from './ZoneParameterPanel'
 import { MeasurementsPanel } from './MeasurementsPanel'
 import { Button } from '../common/Button'
@@ -15,6 +16,8 @@ interface ConfigurationProps {
 
 export function Configuration({
   configuration,
+  onSelectZone,
+  onToggleZone,
   onUpdateZoneParams,
   onResetZone,
   onToggleOutline,
@@ -23,6 +26,12 @@ export function Configuration({
   return (
     <div className="mx-auto grid max-w-[1200px] grid-cols-1 gap-8 lg:grid-cols-[1fr_350px]">
       <div className="flex flex-col gap-6">
+        <ZoneTabs
+          activeZone={configuration.activeZone}
+          enabledZones={configuration.enabledZones}
+          onSelectZone={onSelectZone}
+          onToggleZone={onToggleZone}
+        />
 
         <ZoneParameterPanel
           zone={configuration.activeZone}
@@ -41,7 +50,13 @@ export function Configuration({
         <div className="mt-4 flex items-center justify-between rounded-xl border border-border bg-surface p-4">
           <div>
             <p className="text-sm font-medium text-ink">Show Before Outline</p>
-            <p className="text-xs text-ink-muted">Display a dotted line of original lips</p>
+            <p className="text-xs text-ink-muted">
+              {configuration.activeZone === 'cheeks'
+                ? 'Display original cheek contours and apex points'
+                : configuration.activeZone === 'jaw'
+                ? 'Display original jawline and chin contour'
+                : 'Display a dotted line of original lips'}
+            </p>
           </div>
           <label className="relative inline-flex cursor-pointer items-center">
             <input 
