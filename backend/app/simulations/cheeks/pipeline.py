@@ -2,12 +2,13 @@
 Cheeks simulation pipeline.
 
 Orchestrates the complete midface/cheek enhancement pipeline:
-1. Face Detection & Cheek Landmark Extraction
-2. Orbital-Safe Mask Generation
-3. RBF + TPS Geometric Deformation
-4. Non-AI Relighting, Specular Sheen & Texture Injection
-5. Feathered Alpha Blending
-6. Optional Before/After Contour Overlay
+1. Input Config & Volume Bounds Validation
+2. Face Detection & Cheek Landmark Extraction
+3. Single-Pass Glasses Detection (glasses.py)
+4. Region Mask Construction with Hard Glasses Occlusion Subtraction
+5. Per-Side Isolated RBF Geometric Deformation with Hard Pixel Protection
+6. Physical Displacement-Driven LAB Relighting & Texture Injection
+7. Feathered Alpha Blending & Hard Original Glasses Restoration
 """
 
 from __future__ import annotations
@@ -17,13 +18,32 @@ from dataclasses import dataclass
 import cv2
 import numpy as np
 
+from app.common.exceptions import DeformationError, FaceNotDetectedError, LandmarkExtractionError
 from app.common.face_detection import FaceDetector
 from app.simulations.cheeks.landmarks import extract_cheek_landmarks
+from app.simulations.cheeks.glasses import detect_glasses
 from app.simulations.cheeks.mask import build_cheek_mask
 from app.simulations.cheeks.deformation import apply_cheek_deformation
 from app.simulations.cheeks.refinement import refine_cheek_region
 
 logger = logging.getLogger(__name__)
+
+VALID_SIDES = {"left", "right", "bilateral"}
+VOLUME_LIMITS = {
+    "lateral_volume_ck1": (0.0, 2.5),
+    "medial_volume_ck2": (0.0, 2.5),
+    "submalar_volume_ck3": (0.0, 2.0),
+}
+
+
+def _validate_config(side: str, **volumes: float) -> None:
+    """Validates side parameter and volume boundaries."""
+    if side not in VALID_SIDES:
+        raise DeformationError(f"Invalid side '{side}'. Must be one of {VALID_SIDES}.")
+    for name, value in volumes.items():
+        lo, hi = VOLUME_LIMITS[name]
+        if not (lo <= value <= hi):
+            raise DeformationError(f"{name}={value} is out of range [{lo}, {hi}].")
 
 
 @dataclass
@@ -62,54 +82,72 @@ def run_cheeks_pipeline(
     skin_elasticity: float = 1.0,
     show_outline: bool = False,
     side: str = "bilateral",
+    return_debug: bool = False,
     face_detector: FaceDetector | None = None,
-) -> np.ndarray:
+) -> np.ndarray | tuple[np.ndarray, dict]:
     """
     Executes the complete Cheeks simulation pipeline.
 
-    Args:
-        image: BGR numpy array (original photo).
-        lateral_volume_ck1: CK1 lateral zygomatic volume (0.0 to 2.5 mL).
-        medial_volume_ck2: CK2 malar apex volume (0.0 to 2.5 mL).
-        submalar_volume_ck3: CK3 lower cheek hollow volume (0.0 to 2.0 mL).
-        asymmetry_mode: Whether independent left/right volume multipliers are active.
-        left_cheek_multiplier: Multiplier for left cheek volume (0.0 to 2.0).
-        right_cheek_multiplier: Multiplier for right cheek volume (0.0 to 2.0).
-        skin_elasticity: Skin elasticity scale (0.8 to 1.2).
-        show_outline: Whether to overlay original cheek contours on output.
-        side: 'left', 'right', or 'bilateral'.
-        face_detector: FaceDetector instance (optional to avoid re-instantiation).
-
     Returns:
-        Transformed BGR image (numpy array).
+        Transformed BGR image (numpy array), or tuple with debug dictionary if return_debug is True.
     """
+    _validate_config(
+        side,
+        lateral_volume_ck1=lateral_volume_ck1,
+        medial_volume_ck2=medial_volume_ck2,
+        submalar_volume_ck3=submalar_volume_ck3,
+    )
+
     if face_detector is None:
         face_detector = FaceDetector()
 
     # 1. Face Detection & Landmark Extraction
-    face_pts = face_detector.get_landmarks(image)
-    landmarks = extract_cheek_landmarks(face_pts)
+    try:
+        face_pts = face_detector.get_landmarks(image)
+    except ValueError as e:
+        raise FaceNotDetectedError(str(e)) from e
 
-    # 2. Region Mask Construction (with lower orbit exclusion cage)
-    
+    try:
+        landmarks = extract_cheek_landmarks(face_pts)
+    except ValueError as e:
+        raise LandmarkExtractionError(str(e)) from e
 
-    # If all volumes are zero, return original
+    # 2. Single-Pass Glasses Detection
+    glasses_detected, glasses_mask = detect_glasses(image, landmarks)
+
     total_vol = lateral_volume_ck1 + medial_volume_ck2 + submalar_volume_ck3
     if total_vol <= 1e-4:
+        if return_debug:
+            empty_mask = np.zeros(image.shape[:2], dtype=np.uint8)
+            return image.copy(), {"mask": empty_mask, "blending_mask": empty_mask}
         return image.copy()
 
+    # Active sub-zones tracking
+    zone_active = {
+        "left_ck1": lateral_volume_ck1 > 0,
+        "left_ck2": medial_volume_ck2 > 0,
+        "left_ck3": submalar_volume_ck3 > 0,
+        "right_ck1": lateral_volume_ck1 > 0,
+        "right_ck2": medial_volume_ck2 > 0,
+        "right_ck3": submalar_volume_ck3 > 0,
+    }
+
+    # 3. Region Mask Construction with hard glasses mask subtraction
     mask = build_cheek_mask(
         image.shape,
         landmarks,
+        glasses_mask=glasses_mask,
         side=side,
+        zone_active=zone_active,
         feather_radius=25,
-        dilate_px=14,
+        dilate_px=8,
     )
 
-    # 3. Geometric Deformation (Gaussian RBF + TPS with Normalized Coordinates)
-    deformed_img, apexes, _ = apply_cheek_deformation(
+    # 4. Isolated Per-Side Geometric Deformation with hard glasses pixel preservation
+    deformed_img, apexes, shifts_px, _ = apply_cheek_deformation(
         image=image,
         landmarks=landmarks,
+        glasses_mask=glasses_mask,
         lateral_volume_ck1=lateral_volume_ck1,
         medial_volume_ck2=medial_volume_ck2,
         submalar_volume_ck3=submalar_volume_ck3,
@@ -120,36 +158,15 @@ def run_cheeks_pipeline(
         side=side,
     )
 
-    # 5. Feathered Alpha Blending (replaces Poisson seamlessClone)
-    #
-    # WHY NOT seamlessClone:
-    #   cv2.seamlessClone fails catastrophically on images with a pure white
-    #   (255,255,255) studio background. Poisson's solver tries to equalise
-    #   gradient equations across the enormous contrast boundary (skin ~180
-    #   vs background 255). To satisfy those equations it floods the entire
-    #   cheek interior with white — causing the bright glow artifact you see.
-    #
-    # FIX — erode + Gaussian-feathered alpha blend:
-    #   1. Erode the mask inward by a few px to guarantee zero background overlap.
-    #   2. Re-apply a light Gaussian feather on the eroded edge for a smooth join.
-    #   3. Composite with standard alpha blending: out = fg*a + bg*(1-a).
-    #   This keeps every blend pixel strictly inside the skin region and
-    #   is immune to background colour, making it safe for all studio photos.
-    #
-    # This mask is computed ONCE here and reused for both the refinement pass
-    # and the final composite below. Previously refine_cheek_region() was
-    # called with the un-eroded `mask` while the final blend used a separately
-    # eroded `blending_mask` — two different boundaries for "what got relit"
-    # vs. "what gets shown". That mismatch, combined with the eye-exclusion
-    # cage carving an interior hole out of `mask`, produced a visible dark
-    # island of frozen/un-relit original pixels near the tear trough. Using
-    # one consistent mask for both stages removes that second seam.
-    erode_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 9))
-    blending_mask = cv2.erode(mask, erode_kernel, iterations=1)
-    blending_mask = cv2.GaussianBlur(blending_mask, (15, 15), 0)
-    # Keep the alpha mask soft so the final composite blends smoothly into the original skin.
+    # Blending mask derived for both refinement and final composite
+    if side != "bilateral":
+        blending_mask = cv2.GaussianBlur(mask, (21, 21), 0)
+    else:
+        erode_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 9))
+        blending_mask = cv2.erode(mask, erode_kernel, iterations=1)
+        blending_mask = cv2.GaussianBlur(blending_mask, (15, 15), 0)
 
-    # 4. Non-AI Refinement (LAB Relighting, Specular Sheen, High-Pass Texture Injection)
+    # 5. Displacement-Driven Relighting and High-Pass Refinement
     refined_img = refine_cheek_region(
         deformed_image=deformed_img,
         mask=blending_mask,
@@ -161,9 +178,11 @@ def run_cheeks_pipeline(
         asymmetry_mode=asymmetry_mode,
         left_multiplier=left_cheek_multiplier,
         right_multiplier=right_cheek_multiplier,
+        side=side,
+        shifts_px=shifts_px,
     )
 
-    # Alpha composite using the same blending_mask used for refinement
+    # 6. Alpha Composite
     alpha = blending_mask.astype(np.float32) / 255.0
     alpha_3c = alpha[:, :, np.newaxis]
     final_img = np.clip(
@@ -171,11 +190,23 @@ def run_cheeks_pipeline(
         0.0, 255.0
     ).astype(np.uint8)
 
-    # 6. Optional Before/After Contour Overlay
+    # 7. Final Glasses Pixel Restoration
+    if glasses_detected and glasses_mask is not None:
+        final_img[glasses_mask > 0] = image[glasses_mask > 0]
+
+    # Leakage assertion for single-sided runs
+    if side != "bilateral":
+        diff = np.abs(final_img.astype(np.int16) - image.astype(np.int16))
+        outside = blending_mask < 5
+        if np.any(outside):
+            max_leak = int(diff[outside].max())
+            if max_leak > 3:
+                logger.warning("Leakage check failed: max diff outside mask=%d (side=%s)", max_leak, side)
+
+    # 8. Contour Overlay Option
     if show_outline:
         overlay = final_img.copy()
 
-        # Draw original cheek sub-zone contours
         if side in ("bilateral", "left"):
             cv2.polylines(
                 overlay,
@@ -185,7 +216,6 @@ def run_cheeks_pipeline(
                 thickness=1,
                 lineType=cv2.LINE_AA,
             )
-            # Mark original left apex
             cv2.circle(
                 overlay,
                 (int(landmarks.left_apex[0]), int(landmarks.left_apex[1])),
@@ -204,7 +234,6 @@ def run_cheeks_pipeline(
                 thickness=1,
                 lineType=cv2.LINE_AA,
             )
-            # Mark original right apex
             cv2.circle(
                 overlay,
                 (int(landmarks.right_apex[0]), int(landmarks.right_apex[1])),
@@ -214,8 +243,10 @@ def run_cheeks_pipeline(
                 lineType=cv2.LINE_AA,
             )
 
-        alpha = 0.65
-        final_img = cv2.addWeighted(overlay, alpha, final_img, 1.0 - alpha, 0)
+        final_img = cv2.addWeighted(overlay, 0.65, final_img, 0.35, 0)
+
+    if return_debug:
+        return final_img, {"mask": mask, "blending_mask": blending_mask}
 
     return final_img
 
@@ -226,7 +257,7 @@ async def run_cheeks_simulation(
 ) -> CheeksSimulationResult:
     """Async wrapper executing the cheeks simulation pipeline."""
     try:
-        result_img = run_cheeks_pipeline(
+        result = run_cheeks_pipeline(
             image=image,
             lateral_volume_ck1=config.lateral_volume_ck1,
             medial_volume_ck2=config.medial_volume_ck2,
@@ -239,7 +270,7 @@ async def run_cheeks_simulation(
             side=config.side,
         )
         return CheeksSimulationResult(
-            image=result_img,
+            image=result if isinstance(result, np.ndarray) else result[0],
             success=True,
             message="Cheek simulation completed successfully.",
         )

@@ -2,7 +2,8 @@
 Cheek-specific landmark extraction and anatomical mapping.
 
 Defines MediaPipe indices for midface sub-zones (CK1, CK2, CK3),
-rigid anchor points, and tear trough / lower orbital exclusion cages.
+rigid anchor points, tear trough / lower orbital exclusion cages,
+and side-local anchor subsets for independent single-cheek deformation.
 """
 
 from __future__ import annotations
@@ -13,12 +14,12 @@ import numpy as np
 CHEEK_LANDMARKS = {
     "left": {
         "lateral_ck1": [234, 127, 162],
-        "malar_ck2": [116,  123, 187],
+        "malar_ck2": [116, 123, 187],
         "submalar_ck3": [205, 203, 206, 207],
     },
     "right": {
         "lateral_ck1": [454, 356, 389],
-        "malar_ck2": [345,  352, 411],
+        "malar_ck2": [345, 352, 411],
         "submalar_ck3": [425, 423, 426, 427],
     },
     "anchors": [
@@ -32,7 +33,7 @@ CHEEK_LANDMARKS = {
     ],
 }
 
-# Eyelid & Tear Trough Safety Cage indices (to prevent tear trough smudging)
+# Eyelid & Tear Trough Safety Cage indices
 EYE_EXCLUSION_LANDMARKS = {
     "left": [111, 117, 118, 119, 120, 121],
     "right": [340, 346, 347, 348, 349, 350],
@@ -52,6 +53,34 @@ ADDITIONAL_ANCHORS = [
     397,  # Right jaw angle
 ]
 
+# Side-specific local anchor subsets (includes same-side facial boundaries + midline anchors)
+LOCAL_ANCHOR_INDICES = {
+    "left": [
+        33,   # Left Eye Outer
+        133,  # Left Eye Inner
+        6,    # Nose Bridge
+        0,    # Upper Lip Center
+        152,  # Chin / Jaw Bottom
+        67,   # Left eyebrow outer
+        2,    # Nose columella base
+        61,   # Mouth left corner
+        148,  # Left mandibular body
+        172,  # Left jaw angle
+    ],
+    "right": [
+        263,  # Right Eye Outer
+        362,  # Right Eye Inner
+        6,    # Nose Bridge
+        0,    # Upper Lip Center
+        152,  # Chin / Jaw Bottom
+        297,  # Right eyebrow outer
+        2,    # Nose columella base
+        291,  # Mouth right corner
+        377,  # Right mandibular body
+        397,  # Right jaw angle
+    ],
+}
+
 
 @dataclass
 class CheekLandmarks:
@@ -64,6 +93,8 @@ class CheekLandmarks:
     right_ck2: np.ndarray
     right_ck3: np.ndarray
     anchors: np.ndarray
+    left_local_anchors: np.ndarray
+    right_local_anchors: np.ndarray
     nose_bridge: np.ndarray
     left_eye_exclusion: np.ndarray
     right_eye_exclusion: np.ndarray
@@ -75,10 +106,10 @@ class CheekLandmarks:
 
 def extract_cheek_landmarks(face_landmarks: np.ndarray) -> CheekLandmarks:
     """
-    Extracts cheek-specific anatomical sub-zones, anchors, and exclusion points.
+    Extracts cheek-specific anatomical sub-zones, global & local anchors, and exclusion points.
 
     Args:
-        face_landmarks: (N, 2) numpy array of face landmarks in pixel coordinates (e.g. 468 or 478 points).
+        face_landmarks: (N, 2) numpy array of face landmarks in pixel coordinates.
 
     Returns:
         CheekLandmarks dataclass instance containing all designated sub-zone arrays.
@@ -96,6 +127,9 @@ def extract_cheek_landmarks(face_landmarks: np.ndarray) -> CheekLandmarks:
 
     all_anchor_indices = CHEEK_LANDMARKS["anchors"] + ADDITIONAL_ANCHORS
     anchors = face_landmarks[all_anchor_indices]
+
+    left_local_anchors = face_landmarks[LOCAL_ANCHOR_INDICES["left"]]
+    right_local_anchors = face_landmarks[LOCAL_ANCHOR_INDICES["right"]]
 
     nose_bridge = face_landmarks[6]
 
@@ -116,6 +150,8 @@ def extract_cheek_landmarks(face_landmarks: np.ndarray) -> CheekLandmarks:
         right_ck2=right_ck2,
         right_ck3=right_ck3,
         anchors=anchors,
+        left_local_anchors=left_local_anchors,
+        right_local_anchors=right_local_anchors,
         nose_bridge=nose_bridge,
         left_eye_exclusion=left_eye_excl,
         right_eye_exclusion=right_eye_excl,
