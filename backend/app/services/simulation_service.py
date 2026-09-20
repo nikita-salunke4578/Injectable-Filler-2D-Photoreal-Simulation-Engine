@@ -33,6 +33,7 @@ from app.common.schemas import (
     TreatmentZone,
 )
 from app.common.image_io import decode_image_base64, encode_image_base64
+from app.simulations.jaw.pipeline import JawSimulationConfig, run_jaw_simulation
 from app.simulations.lips.pipeline import run_lips_pipeline
 from app.simulations.cheeks.pipeline import run_cheeks_pipeline
 
@@ -114,8 +115,15 @@ class SimulationService:
                     side=side,
                 )
             elif z_req.zone == TreatmentZone.JAW:
-                # TODO: Implement jaw
-                pass
+                config = JawSimulationConfig(
+                    volume_ml=z_req.volume,
+                    intensity=z_req.intensity,
+                    definition=z_req.meta.get("definition", 0),
+                )
+                result = await run_jaw_simulation(current_image, config)
+                if not result.success or result.image is None:
+                    raise ValueError(result.message)
+                current_image = result.image
                 
             total_vol += z_req.volume
 

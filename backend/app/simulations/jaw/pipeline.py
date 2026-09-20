@@ -32,10 +32,14 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
 
-if TYPE_CHECKING:
-    import numpy as np  # type: ignore[import-untyped]
+import numpy as np
+
+from app.common.face_detection import FaceDetector
+from .deformation import apply_jaw_deformation
+from .landmarks import extract_jaw_landmarks
+from .mask import build_jaw_mask
+from .refinement import refine_jaw_region
 
 logger = logging.getLogger(__name__)
 
@@ -95,16 +99,89 @@ async def run_jaw_simulation(
         - Wire up blending from app.common.blending.
         - Add validation.
     """
-    logger.info(
-        "run_jaw_simulation called with volume=%.1f, intensity=%.2f, definition=%d",
-        config.volume_ml,
-        config.intensity,
-        config.definition,
-    )
+    try:
+        if image is None:
+            raise ValueError("Input image must not be None.")
+        if not isinstance(image, np.ndarray):
+            raise ValueError("Input image must be a NumPy array.")
+        if image.ndim != 3 or image.shape[2] != 3:
+            raise ValueError("Input image must have shape HxWx3.")
+        if image.dtype != np.uint8:
+            raise ValueError("Input image must have dtype uint8.")
 
-    # TODO: Implement the pipeline steps.
-    return JawSimulationResult(
-        image=None,
-        success=False,
-        message="Jaw simulation pipeline is under development.",
-    )
+        if not 0.0 <= config.intensity <= 1.0:
+            raise ValueError("Config intensity must be in the range [0, 1].")
+        if not 0 <= config.definition <= 100:
+            raise ValueError("Config definition must be in the range [0, 100].")
+        if not 0.0 <= config.volume_ml <= 3.0:
+            raise ValueError("Config volume_ml must be in the range [0, 3].")
+
+        if config.intensity == 0.0 or config.definition == 0:
+            return JawSimulationResult(
+                image=image.copy(),
+                success=True,
+                message="Jaw simulation completed successfully.",
+            )
+
+        logger.info(
+            "run_jaw_simulation called with volume=%.1f, intensity=%.2f, definition=%d",
+            config.volume_ml,
+            config.intensity,
+            config.definition,
+        )
+
+        detector = FaceDetector()
+        face_landmarks = detector.get_landmarks(image)
+        jaw_landmarks = extract_jaw_landmarks(face_landmarks)
+        if jaw_landmarks is None:
+            raise ValueError("Jaw landmarks could not be extracted from the detected face.")
+
+        jaw_mask = build_jaw_mask(
+            image.shape[:2],
+            jaw_landmarks,
+            feather_radius=25,
+        )
+        deformed_image = apply_jaw_deformation(
+            image,
+            jaw_landmarks,
+            intensity=config.intensity,
+            definition=config.definition,
+        )
+        refined_image = await refine_jaw_region(
+            deformed_image,
+            jaw_mask,
+            original_image=image,
+        )
+
+        if refined_image is None:
+            raise ValueError("Jaw refinement returned no image.")
+        if not isinstance(refined_image, np.ndarray):
+            raise ValueError("Jaw refinement returned a non-NumPy image.")
+        if refined_image.shape != image.shape:
+            raise ValueError("Jaw refinement returned an image with an invalid shape.")
+        if refined_image.dtype != np.uint8:
+            raise ValueError("Jaw refinement returned an image with an invalid dtype.")
+
+        final_image = refined_image.copy()
+        
+        if final_image is None:
+            raise ValueError("Final image is None.")
+        if final_image.shape != image.shape:
+            raise ValueError("Final image shape does not match the original image.")
+        if final_image.dtype != np.uint8:
+            raise ValueError("Final image dtype is not uint8.")
+        if not np.isfinite(final_image).all():
+            raise ValueError("Final image contains non-finite values.")
+
+        return JawSimulationResult(
+            image=final_image,
+            success=True,
+            message="Jaw simulation completed successfully.",
+        )
+    except Exception as exc:
+        logger.exception("Jaw simulation failed.")
+        return JawSimulationResult(
+            image=None,
+            success=False,
+            message=f"Jaw simulation failed: {exc}",
+        )

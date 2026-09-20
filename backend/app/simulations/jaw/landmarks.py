@@ -32,10 +32,21 @@ import logging
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+import numpy as np
+
 if TYPE_CHECKING:
     from app.common.face_detection import FaceLandmarks
 
 logger = logging.getLogger(__name__)
+
+# MediaPipe Face Mesh lower-jaw contour points. These indices are the actual
+# documented face-oval/jawline points used for the mandibular contour, with
+# explicit left/right angle and chin anchors.
+LEFT_JAW_CONTOUR_INDICES = (132, 58, 172, 136, 150, 149, 176, 148, 152)
+RIGHT_JAW_CONTOUR_INDICES = (361, 288, 397, 365, 379, 378, 400, 377, 152)
+CHIN_INDEX = 152
+LEFT_JAW_ANGLE_INDEX = 132
+RIGHT_JAW_ANGLE_INDEX = 361
 
 
 @dataclass
@@ -58,20 +69,74 @@ class JawLandmarks:
 
 
 def extract_jaw_landmarks(face: "FaceLandmarks") -> JawLandmarks | None:
-    """Extract jaw-specific landmarks from a full face mesh.
+    """Extract jaw-specific landmarks from the shared MediaPipe face mesh.
 
-    Args:
-        face: Full face-mesh landmarks from the shared detector.
-
-    Returns:
-        ``JawLandmarks`` on success, ``None`` if required landmarks
-        are missing or below confidence threshold.
-
-    TODO:
-        - Select the appropriate MediaPipe indices for the jaw contour.
-        - Convert from normalised to pixel coordinates.
-        - Identify chin and jaw-angle points.
-        - Add confidence filtering.
+    In this repository, the shared detector already returns a NumPy array of
+    landmark coordinates in pixel space, not a custom FaceLandmarks dataclass.
+    The jaw extractor therefore reads the raw face mesh array directly and
+    validates the required lower-jaw landmarks before returning.
     """
-    logger.info("extract_jaw_landmarks called (placeholder — not yet implemented)")
-    return None
+    if face is None:
+        logger.warning("Jaw landmark extraction received a null face object.")
+        return None
+
+    try:
+        landmark_count = len(face)
+    except TypeError:
+        logger.warning("Jaw landmark extraction requires a sequence of face mesh points.")
+        return None
+
+    required_indices = (
+        LEFT_JAW_CONTOUR_INDICES + RIGHT_JAW_CONTOUR_INDICES + (CHIN_INDEX, LEFT_JAW_ANGLE_INDEX, RIGHT_JAW_ANGLE_INDEX)
+    )
+    missing_indices = [index for index in sorted(set(required_indices)) if index >= landmark_count]
+    if missing_indices:
+        logger.warning(
+            "Jaw landmark extraction missing required MediaPipe indices: %s (landmark_count=%d)",
+            missing_indices,
+            landmark_count,
+        )
+        return None
+
+    def read_point(index: int) -> tuple[int, int] | None:
+        try:
+            point = face[index]
+        except (IndexError, TypeError):
+            logger.warning("Jaw landmark extraction could not read index %d.", index)
+            return None
+
+        if point is None or len(point) < 2:
+            logger.warning("Jaw landmark extraction found an incomplete point at index %d.", index)
+            return None
+
+        x_value, y_value = point[0], point[1]
+        try:
+            x_coord = int(round(float(x_value)))
+            y_coord = int(round(float(y_value)))
+        except (TypeError, ValueError):
+            logger.warning("Jaw landmark extraction found a non-numeric point at index %d.", index)
+            return None
+
+        if not (np.isfinite(x_value) and np.isfinite(y_value)):
+            logger.warning("Jaw landmark extraction found a non-finite point at index %d.", index)
+            return None
+
+        return x_coord, y_coord
+
+    left_contour = [read_point(index) for index in LEFT_JAW_CONTOUR_INDICES]
+    right_contour = [read_point(index) for index in RIGHT_JAW_CONTOUR_INDICES]
+    chin = read_point(CHIN_INDEX)
+    jaw_angle_left = read_point(LEFT_JAW_ANGLE_INDEX)
+    jaw_angle_right = read_point(RIGHT_JAW_ANGLE_INDEX)
+
+    if any(point is None for point in left_contour + right_contour + [chin, jaw_angle_left, jaw_angle_right]):
+        logger.warning("Jaw landmark extraction failed because one or more required landmarks were invalid or missing.")
+        return None
+
+    return JawLandmarks(
+        left_contour=[tuple(point) for point in left_contour],
+        right_contour=[tuple(point) for point in right_contour],
+        chin=tuple(chin),
+        jaw_angle_left=tuple(jaw_angle_left),
+        jaw_angle_right=tuple(jaw_angle_right),
+    )

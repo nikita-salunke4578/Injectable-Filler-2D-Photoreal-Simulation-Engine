@@ -274,7 +274,7 @@ export function useSimulatorWizard(initialZone: TreatmentZone = 'lips') {
         dispatch({ 
           type: 'UPDATE_ZONE_PARAMS', 
           zone: currentZone, 
-          patch: result.suggested_parameters as unknown as Record<string, unknown>, 
+          patch: { ...result.suggested_parameters }
         })
       }
       

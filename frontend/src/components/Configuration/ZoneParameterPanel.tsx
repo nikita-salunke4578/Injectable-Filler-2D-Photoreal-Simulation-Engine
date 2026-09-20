@@ -398,6 +398,47 @@ export function ZoneParameterPanel({ zone, configuration, disabled, onUpdate, on
     )
   }
 
+  if (zone === 'jaw') {
+    const params = configuration.parameters.jaw
+    return (
+      <div className="flex flex-col gap-8">
+        <div>
+          <div className="flex justify-between items-center mb-4">
+            <h3 className="text-xs font-semibold tracking-wider text-ink-faint uppercase">Parameters</h3>
+            <button onClick={() => onReset('jaw')} className="text-xs text-accent hover:underline">Reset</button>
+          </div>
+
+          <div className="flex flex-col gap-6">
+            <div className="flex flex-col gap-1">
+              <ParameterSlider
+                label="Jaw Volume"
+                value={params.volumeMl}
+                min={0}
+                max={3}
+                unit="mL"
+                disabled={disabled}
+                onChange={(v) => onUpdate('jaw', { volumeMl: v })}
+              />
+              <p className="text-[10px] text-ink-muted">Controls the simulated filler volume along the jawline.</p>
+            </div>
+            <div className="flex flex-col gap-1">
+              <ParameterSlider
+                label="Jawline Definition"
+                value={params.definition}
+                min={0}
+                max={100}
+                unit="%"
+                disabled={disabled}
+                onChange={(v) => onUpdate('jaw', { definition: v })}
+              />
+              <p className="text-[10px] text-ink-muted">Sharpens the contour from soft and natural to more defined.</p>
+            </div>
+          </div>
+        </div>
+      </div>
+    )
+  }
+
   return (
     <div className="text-sm text-ink-muted p-4">Zone not supported.</div>
   )

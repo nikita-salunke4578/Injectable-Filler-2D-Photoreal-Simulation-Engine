@@ -32,7 +32,9 @@ export function ZoneTabs({ activeZone, enabledZones, onSelectZone, onToggleZone 
               />
               <button
                 type="button"
-                onClick={() => onSelectZone(zone.id)}
+                onClick={() => {
+                onSelectZone(zone.id)
+                }}
                 disabled={!isEnabled}
                 className={clsx(
                   'text-sm font-medium disabled:cursor-not-allowed disabled:text-ink-faint',
