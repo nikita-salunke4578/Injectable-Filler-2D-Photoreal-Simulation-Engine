@@ -7,9 +7,7 @@ to generate personalized clinical filler recommendations and auto-fill slider va
 """
 
 from __future__ import annotations
-
 import numpy as np
-
 from app.common.face_detection import FaceDetector
 from app.simulations.cheeks.landmarks import extract_cheek_landmarks
 

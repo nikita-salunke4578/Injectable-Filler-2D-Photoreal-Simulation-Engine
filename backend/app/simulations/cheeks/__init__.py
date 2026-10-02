@@ -5,7 +5,7 @@ Contains the midface/cheek treatment simulation pipeline:
     landmarks.py   – Cheek-specific landmark extraction, sub-zones & local anchor subsets
     glasses.py     – Eyeglasses detection & hard binary mask generation
     mask.py        – Orbital-safe cheek mask generation with glasses occlusion subtraction
-    deformation.py – Isolated per-side geometric cheek deformation (RBF + TPS)
+    deformation.py – Isolated per-side geometric cheek deformation (RBF)
     refinement.py  – Displacement-driven LAB relighting and high-pass pore injection
     pipeline.py    – Orchestrates end-to-end simulation, validation & feathered alpha blending
 """
