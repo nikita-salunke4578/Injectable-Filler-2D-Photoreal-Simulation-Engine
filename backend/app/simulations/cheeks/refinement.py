@@ -1,8 +1,11 @@
 """
-Cheek region physical relighting, specular sheen, and high-pass texture injection.
+Cheek photometric refinement.
 
-Recreates natural 3D surface shading and skin pore preservation driven
-by physical displacement distance without spatial mask dependency risks.
+Converts the geometric deformation into a subtle 2D shading cue
+and restores high-frequency skin texture from the original image.
+
+This is a classical image-processing refinement stage.
+It is not a physical 3D tissue renderer.
 """
 
 from __future__ import annotations
@@ -11,6 +14,99 @@ import cv2
 import numpy as np
 
 from app.simulations.cheeks.landmarks import CheekLandmarks
+
+
+def _gaussian_map(
+    grid_x: np.ndarray,
+    grid_y: np.ndarray,
+    center: np.ndarray,
+    sigma: float,
+) -> np.ndarray:
+    """Generate normalized Gaussian influence around a cheek apex."""
+
+    sigma = max(
+        float(sigma),
+        1.0,
+    )
+
+    dx = grid_x - float(center[0])
+    dy = grid_y - float(center[1])
+
+    distance_sq = (
+        dx * dx
+        + dy * dy
+    )
+
+    return np.exp(
+        -distance_sq
+        / (2.0 * sigma * sigma)
+    )
+
+
+def _displacement_shading(
+    shape: tuple[int, int],
+    apex: np.ndarray,
+    displacement_px: float,
+    face_scale: float,
+) -> np.ndarray:
+    """
+    Create a smooth local shading field from actual displacement.
+
+    The field is intentionally subtle. It is used as a visual cue,
+    not as a physical lighting simulation.
+    """
+
+    h, w = shape
+
+    y, x = np.indices(
+        (h, w),
+        dtype=np.float32,
+    )
+
+    sigma = max(
+        28.0 * face_scale,
+        8.0,
+    )
+
+    gaussian = _gaussian_map(
+        x,
+        y,
+        apex,
+        sigma,
+    )
+
+    # Normalize displacement into a conservative shading coefficient.
+    displacement_factor = np.clip(
+        displacement_px / max(
+            14.0 * face_scale,
+            1.0,
+        ),
+        0.0,
+        1.0,
+    )
+
+    # Very subtle central lift.
+    return (
+        gaussian
+        * displacement_factor
+    )
+
+
+def _texture_high_pass(
+    image: np.ndarray,
+) -> np.ndarray:
+    """Extract high-frequency skin texture."""
+
+    blurred = cv2.GaussianBlur(
+        image,
+        (5, 5),
+        1.2,
+    )
+
+    return (
+        image.astype(np.float32)
+        - blurred.astype(np.float32)
+    )
 
 
 def refine_cheek_region(
@@ -29,77 +125,188 @@ def refine_cheek_region(
     shifts_px: tuple[float, float] = (0.0, 0.0),
 ) -> np.ndarray:
     """
-    Applies physics-based relighting and texture injection scaled directly by displacement magnitude.
+    Apply subtle displacement-driven photometric refinement.
 
-    Args:
-        deformed_image: Warped BGR image (HxWx3 uint8).
-        mask: Feathered cheek mask (HxW uint8 0-255).
-        landmarks: CheekLandmarks dataclass.
-        apexes: (left_apex_disp, right_apex_disp) pixel coordinates of deformed peaks.
-        original_image: Original unmodified BGR image for high-pass texture extraction.
-        medial_volume_ck2: CK2 volume in mL.
-        submalar_volume_ck3: CK3 volume in mL.
-        asymmetry_mode: Whether asymmetry multipliers apply.
-        left_multiplier: Left cheek multiplier.
-        right_multiplier: Right cheek multiplier.
-        side: 'left', 'right', or 'bilateral'.
-        shifts_px: Physical apex displacement distance in pixels (left_shift_px, right_shift_px).
+    Parameters
+    ----------
+    deformed_image:
+        Output of the RBF geometric deformation.
 
-    Returns:
-        Refined BGR image (HxWx3 uint8).
+    mask:
+        Final anatomical cheek blending mask.
+
+    landmarks:
+        Cheek landmark structure.
+
+    apexes:
+        Displaced left/right CK2 apexes.
+
+    original_image:
+        Original input image.
+
+    shifts_px:
+        Actual geometric displacement magnitude for left/right cheek.
+
+    Returns
+    -------
+    np.ndarray
+        Refined BGR image.
     """
-    h, w = deformed_image.shape[:2]
-    mask_norm = (mask.astype(np.float32) / 255.0)[:, :, np.newaxis]
 
-    include_left = side in ("bilateral", "left")
-    include_right = side in ("bilateral", "right")
+    if deformed_image.shape != original_image.shape:
+        raise ValueError(
+            "deformed_image and original_image must have identical shapes."
+        )
+
+    if mask.shape[:2] != deformed_image.shape[:2]:
+        raise ValueError(
+            "mask must match image height and width."
+        )
+
+    h, w = deformed_image.shape[:2]
+
+    include_left = side in {
+        "left",
+        "bilateral",
+    }
+
+    include_right = side in {
+        "right",
+        "bilateral",
+    }
 
     left_apex, right_apex = apexes
-    left_shift_px, right_shift_px = shifts_px
 
-    # 1. LAB Lightness Relighting
-    lab = cv2.cvtColor(deformed_image, cv2.COLOR_BGR2LAB).astype(np.float32)
+    left_shift, right_shift = shifts_px
+
+    # ---------------------------------------------------------
+    # Face scale
+    # ---------------------------------------------------------
+
+    eye_distance = max(
+        float(
+            np.linalg.norm(
+                landmarks.anchors[2]
+                - landmarks.anchors[0]
+            )
+        ),
+        30.0,
+    )
+
+    face_scale = eye_distance / 140.0
+
+    # ---------------------------------------------------------
+    # Mask
+    # ---------------------------------------------------------
+
+    mask_norm = (
+        mask.astype(np.float32)
+        / 255.0
+    )
+
+    mask_3 = mask_norm[:, :, None]
+
+    # ---------------------------------------------------------
+    # Build displacement-driven shading
+    # ---------------------------------------------------------
+
+    shading = np.zeros(
+        (h, w),
+        dtype=np.float32,
+    )
+
+    if include_left and left_shift > 0.01:
+        shading += _displacement_shading(
+            (h, w),
+            left_apex,
+            left_shift,
+            face_scale,
+        )
+
+    if include_right and right_shift > 0.01:
+        shading += _displacement_shading(
+            (h, w),
+            right_apex,
+            right_shift,
+            face_scale,
+        )
+
+    shading = np.clip(
+        shading,
+        0.0,
+        1.0,
+    )
+
+    # ---------------------------------------------------------
+    # LAB lightness refinement
+    # ---------------------------------------------------------
+
+    lab = cv2.cvtColor(
+        deformed_image,
+        cv2.COLOR_BGR2LAB,
+    ).astype(np.float32)
+
     l_channel = lab[:, :, 0]
 
-    grid_y, grid_x = np.indices((h, w), dtype=np.float32)
+    # Deliberately conservative.
+    # This is a visual refinement, not physical illumination.
+    LIGHTNESS_GAIN = 0.035
 
-    eye_dist = max(float(np.linalg.norm(landmarks.anchors[2] - landmarks.anchors[0])), 30.0)
-    face_scale = eye_dist / 140.0
-    apex_radius = 28.0 * face_scale
+    l_delta = (
+        l_channel
+        * LIGHTNESS_GAIN
+        * shading
+        * mask_norm
+    )
 
-    nose_x = float(landmarks.nose_bridge[0])
-    half_w = float(w) * 0.5
-    x_dist_from_center = np.abs(grid_x - nose_x)
-    max_lateral_reach = half_w * 0.24
-    lateral_decay = np.clip(1.0 - (x_dist_from_center / max_lateral_reach), 0.0, 1.0)
-    lateral_decay = (1.0 - np.cos(lateral_decay * np.pi)) * 0.5
+    lab[:, :, 0] = np.clip(
+        l_channel + l_delta,
+        0.0,
+        255.0,
+    )
 
-    # Derive highlight intensity directly from physical surface displacement magnitude
-    boost_left = (min(0.10, 0.02 + 0.006 * left_shift_px) if include_left and left_shift_px > 0.1 else 0.0)
-    d2_left = (grid_x - left_apex[0]) ** 2 + (grid_y - left_apex[1]) ** 2
-    hl_map_left = np.exp(-d2_left / (2.0 * (apex_radius ** 2))) * lateral_decay
+    relit = cv2.cvtColor(
+        lab.astype(np.uint8),
+        cv2.COLOR_LAB2BGR,
+    )
 
-    boost_right = (min(0.10, 0.02 + 0.006 * right_shift_px) if include_right and right_shift_px > 0.1 else 0.0)
-    d2_right = (grid_x - right_apex[0]) ** 2 + (grid_y - right_apex[1]) ** 2
-    hl_map_right = np.exp(-d2_right / (2.0 * (apex_radius ** 2))) * lateral_decay
+    # ---------------------------------------------------------
+    # Skin texture restoration
+    # ---------------------------------------------------------
 
-    combined_hl = boost_left * hl_map_left + boost_right * hl_map_right
-    combined_hl = np.clip(combined_hl, 0.0, 1.0)
+    high_pass = _texture_high_pass(
+        original_image
+    )
 
-    # Multiplicative L channel brightening
-    MAX_BOOST = 0.035
-    l_channel_boosted = l_channel * (1.0 + MAX_BOOST * combined_hl * mask_norm[:, :, 0])
-    lab[:, :, 0] = np.clip(l_channel_boosted, 0.0, 255.0)
-    relit = cv2.cvtColor(lab.astype(np.uint8), cv2.COLOR_LAB2BGR)
+    # Avoid aggressive texture amplification.
+    TEXTURE_WEIGHT = 0.30
 
-    # 2. High-Pass Texture Injection (Pore & Skin Detail Restoration)
-    blurred_orig = cv2.GaussianBlur(original_image, (5, 5), 1.2)
-    high_pass = original_image.astype(np.float32) - blurred_orig.astype(np.float32)
+    textured = (
+        relit.astype(np.float32)
+        + TEXTURE_WEIGHT
+        * high_pass
+        * mask_3
+    )
 
-    texture_weight = 0.35
-    textured = relit.astype(np.float32) + texture_weight * high_pass * mask_norm
-    textured = np.clip(textured, 0.0, 255.0).astype(np.uint8)
+    textured = np.clip(
+        textured,
+        0.0,
+        255.0,
+    )
 
-    refined = (textured.astype(np.float32) * mask_norm + deformed_image.astype(np.float32) * (1.0 - mask_norm)).astype(np.uint8)
+    # ---------------------------------------------------------
+    # Final refinement constrained by mask
+    # ---------------------------------------------------------
 
-    return refined
+    refined = (
+        textured * mask_3
+        + deformed_image.astype(
+            np.float32
+        ) * (1.0 - mask_3)
+    )
+
+    return np.clip(
+        refined,
+        0.0,
+        255.0,
+    ).astype(np.uint8)
