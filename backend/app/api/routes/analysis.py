@@ -1,6 +1,8 @@
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
+from app.simulations.jaw.analysis import analyze_jaw_proportions
+
 from app.common.image_io import decode_image_base64
 from app.simulations.lips.analysis import analyze_facial_proportions
 from app.simulations.cheeks.analysis import analyze_cheek_proportions
@@ -26,10 +28,20 @@ async def analyze_face(request: AnalyzeRequest) -> dict:
         if "error" in result:
             raise HTTPException(status_code=400, detail=result["error"])
         return result
+
     elif request.zone == "cheeks":
         result = analyze_cheek_proportions(image)
         if "error" in result:
             raise HTTPException(status_code=400, detail=result["error"])
         return result
-    
-    raise HTTPException(status_code=400, detail=f"Analysis for zone {request.zone} not implemented yet.")
+
+    elif request.zone == "jaw":
+        result = analyze_jaw_proportions(image)
+        if "error" in result:
+            raise HTTPException(status_code=400, detail=result["error"])
+        return result
+
+    raise HTTPException(
+        status_code=400,
+        detail=f"Analysis for zone {request.zone} not implemented yet."
+   )
