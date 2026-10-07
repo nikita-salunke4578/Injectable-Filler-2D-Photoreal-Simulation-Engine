@@ -40,6 +40,8 @@ async def run_simulation(request: SimulationRequest) -> dict:
     try:
         result = await _service.run_simulation(request)
         return result.model_dump()
+    except ValueError as exc:                      # e.g. "No face detected", bad image
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     except Exception as exc:
         raise HTTPException(
             status_code=500,
@@ -60,6 +62,8 @@ async def run_cheek_simulation(request: CheekSimulationRequest) -> dict:
     try:
         result = await _service.run_cheek_simulation(request)
         return result
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     except Exception as exc:
         raise HTTPException(
             status_code=500,

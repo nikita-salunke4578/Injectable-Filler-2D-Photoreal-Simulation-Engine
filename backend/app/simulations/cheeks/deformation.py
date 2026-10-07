@@ -1,1039 +1,304 @@
 """
-RBF-based cheek deformation engine.
+Geometric cheek deformation - three DIFFERENT, mode-specific displacement fields.
 
-Architecture
-------------
-Treatment volume
-    ↓
-Face-scale normalization
-    ↓
-CK1 / CK2 / CK3 control-point displacement
-    ↓
-Hard anatomical anchors
-    ↓
-Frozen local ROI perimeter
-    ↓
-Inverse RBF mapping
-    ↓
-OpenCV remap
+Backward mapping per pixel:  src(p) = p - d(p)   (so content moves by +d)
 
-Important
----------
-The volume-to-pixel conversion is a visual calibration parameter.
-It does NOT represent physical filler volume, tissue mechanics, or
-true 3D volumetric conservation.
+    d(p) = sum over zones  G_z(p) * gate_z(p) * medial(p) * half(p) * protect_z(p) *
+                           amp_z * [ w_radial * r_z(p)  +  w_push * push_z ]
+
+  r_z  = normalised radial offset in the zone's elliptical frame (dome / "forward" expansion;
+         in a frontal photo anterior projection shows up as local magnification)
+  push = a fixed unit direction (lateral, up, or toward the contour chord)
+
+  CK1 ZYGOMATIC  w_push 0.85 (outward 0.90 + up 0.30), w_radial 0.15, gated OFF below the arch
+                 -> widens/raises the upper-lateral contour, lower cheek untouched
+  CK2 MALAR      w_radial 0.85, w_push 0.15 (up) -> pure forward dome, no net lateral drift;
+                 ellipse leans to the infra-orbital rim, plus a photometric under-eye blend
+  CK3 SUBMALAR   w_push 0.70 (outward normal of the zygoma->gonion chord) + w_radial 0.30,
+                 gated OFF above the apex, amplitude capped by the MEASURED hollow depth
+                 -> concavity correction, no upward lift, no new cheekbone
+
+Shared safety: elliptical Gaussian falloff, mid-cheek safety line (medial canthus -> gonion),
+per-side half-plane (unilateral work stays on its own cheek), frozen eyelids / tear trough /
+lips / nose wing / glasses, nothing above the eye line, per-zone face-outline support (lateral
+zones may move the silhouette a little, CK2 may not), and a fold check on the backward map
+(min det(I - J) >= 0.35, else the whole field is scaled down).
 """
-
 from __future__ import annotations
 
 import cv2
 import numpy as np
-from scipy.interpolate import Rbf
 
-from app.simulations.cheeks.landmarks import CheekLandmarks
+from .landmarks import CheekLandmarks, SideGeometry
 
+# mL (per side, per zone) -> peak displacement as a fraction of inter-ocular distance.
+# Sub-linear (power 0.8): the 2nd mL looks like less than 2x the 1st.
+_MM_PER_ML = {"ck1": 0.070, "ck2": 0.075, "ck3": 0.055}
+# per-mode mix of radial (forward dome) vs directional push. This is what makes the modes differ.
+_MIX = {"ck1": dict(radial=0.15, push=0.85),
+        "ck2": dict(radial=0.85, push=0.15),
+        "ck3": dict(radial=0.30, push=0.70)}
+# how much of the displacement survives AT the face outline. CK1/CK3 move the silhouette (zygomatic
+# width, filled lower-cheek contour); CK2 is anterior projection and must not drag skin over the background.
+_OUTLINE_FLOOR = {"ck1": 0.65, "ck2": 0.22, "ck3": 0.55}
+ZONES = ("ck1", "ck2", "ck3")
+MAX_VOLUME_ML = 3.0
 
-# ---------------------------------------------------------------------
-# Visual calibration constants
-# ---------------------------------------------------------------------
-
-PX_PER_ML_AT_REFERENCE_FACE = 22.0
-
-REFERENCE_INTEROCULAR_DISTANCE = 140.0
-
-BASE_SIGMA_PX = 35.0
-
-ROI_PADDING_PX = 40
-
-MAX_CK1_DISPLACEMENT = 10.0
-MAX_CK2_DISPLACEMENT = 14.0
-MAX_CK3_DISPLACEMENT = 14.0
-
-RBF_SMOOTH = 1e-3
+# Skin elasticity semantics = the UI's "Skin Elasticity Scale" slider (0.8x .. 1.2x): it scales the kernel SPREAD radius.
+# 0.8 = tight youthful skin  -> tighter, more localised, crisper contour
+# 1.2 = mature lax skin      -> broader, softer deformation, less crisp projection
 
 
-def _normalize_vec(v: np.ndarray) -> np.ndarray:
-    """Return a unit 2D vector."""
+def elasticity_response(scale: float) -> dict:
+    """Tissue response from the Skin Elasticity Scale (clipped to 0.8 .. 1.2).
 
-    v = np.asarray(v, dtype=np.float64)
-
-    norm = float(np.linalg.norm(v))
-
-    if norm < 1e-8:
-        return np.zeros_like(v)
-
-    return v / norm
-
-
-def _face_scale(
-    eye_left: np.ndarray,
-    eye_right: np.ndarray,
-) -> float:
+    spread : multiplier on every zone's footprint = the slider value itself (kernel spread radius)
+    peak   : peak-displacement multiplier (lax bolus is spread wider, so it also looks less projected)
+    crisp  : multiplier on the crest highlight (definition of the projection)
     """
-    Estimate image-relative face scale from inter-ocular distance.
-    """
-
-    eye_distance = max(
-        float(np.linalg.norm(eye_right - eye_left)),
-        30.0,
-    )
-
-    return eye_distance / REFERENCE_INTEROCULAR_DISTANCE
-
-
-def _perimeter_points(
-    x_min: int,
-    x_max: int,
-    y_min: int,
-    y_max: int,
-    n: int = 8,
-) -> np.ndarray:
-    """
-    Generate fixed perimeter control points.
-
-    These points enforce zero displacement at the local ROI boundary
-    and prevent the RBF field from freely drifting outside the treatment
-    region.
-    """
-
-    x_values = np.linspace(
-        x_min,
-        x_max,
-        n,
-    )
-
-    y_values = np.linspace(
-        y_min,
-        y_max,
-        n,
-    )
-
-    points: list[list[float]] = []
-
-    for x in x_values:
-        points.append(
-            [float(x), float(y_min)]
-        )
-        points.append(
-            [float(x), float(y_max)]
-        )
-
-    for y in y_values:
-        points.append(
-            [float(x_min), float(y)]
-        )
-        points.append(
-            [float(x_max), float(y)]
-        )
-
-    return np.asarray(
-        points,
-        dtype=np.float64,
-    )
-
-
-def _zone_direction(
-    point: np.ndarray,
-    zone: str,
-    side: str,
-    nose_bridge: np.ndarray,
-    face_x_axis: np.ndarray,
-    face_y_axis: np.ndarray,
-) -> np.ndarray:
-    """
-    Calculate the desired displacement direction.
-
-    Static anatomical vectors provide stability.
-    A dynamic radial component adapts the vector to the actual face.
-    """
-
-    static_dirs = {
-        "left": {
-            "ck1": (-0.10, -0.04),
-            "ck2": (-0.46, -0.18),
-            "ck3": (-0.52, 0.38),
-        },
-        "right": {
-            "ck1": (0.10, -0.04),
-            "ck2": (0.46, -0.18),
-            "ck3": (0.52, 0.38),
-        },
-    }
-
-    local_x, local_y = static_dirs[side][zone]
-
-    static_vector = (
-        local_x * face_x_axis
-        + local_y * face_y_axis
-    )
-
-    static_vector = _normalize_vec(
-        static_vector
-    )
-
-    radial_vector = _normalize_vec(
-        point.astype(np.float64)
-        - nose_bridge.astype(np.float64)
-    )
-
-    if np.linalg.norm(radial_vector) < 1e-8:
-        return static_vector
-
-    # Anatomically stable blend.
-    direction = (
-        0.65 * static_vector
-        + 0.35 * radial_vector
-    )
-
-    return _normalize_vec(direction)
-
-
-def _zone_displacement(
-    point: np.ndarray,
-    zone_center: np.ndarray,
-    volume_ml: float,
-    multiplier: float,
-    sigma: float,
-    px_per_ml: float,
-    direction: np.ndarray,
-    max_displacement: float,
-) -> np.ndarray:
-    """
-    Calculate displacement at one anatomical control point.
-
-    Gaussian falloff means the treatment center receives maximum
-    displacement while nearby points receive progressively less.
-    """
-
-    effective_volume = max(
-        0.0,
-        float(volume_ml) * float(multiplier),
-    )
-
-    if effective_volume <= 0.0:
-        return np.zeros(2, dtype=np.float64)
-
-    distance = float(
-        np.linalg.norm(
-            point - zone_center
-        )
-    )
-
-    gaussian_weight = np.exp(
-        -(
-            distance ** 2
-        )
-        / (
-            2.0 * sigma ** 2
-        )
-    )
-
-    displacement_magnitude = (
-        effective_volume
-        * px_per_ml
-        * gaussian_weight
-    )
-
-    displacement_magnitude = min(
-        displacement_magnitude,
-        max_displacement,
-    )
-
-    return (
-        direction
-        * displacement_magnitude
-    )
-
-
-def _append_zone_controls(
-    src_points: list[np.ndarray],
-    dst_points: list[np.ndarray],
-    pts: np.ndarray,
-    volume_ml: float,
-    multiplier: float,
-    zone: str,
-    side: str,
-    nose_bridge: np.ndarray,
-    face_x_axis: np.ndarray,
-    face_y_axis: np.ndarray,
-    sigma: float,
-    px_per_ml: float,
-    max_displacement: float,
-) -> tuple[np.ndarray, np.ndarray]:
-    """
-    Add RBF source/target control pairs for one treatment zone.
-    """
-
-    if pts is None or len(pts) == 0:
-        return (
-            np.zeros(2, dtype=np.float64),
-            np.zeros(2, dtype=np.float64),
-        )
-
-    pts = np.asarray(
-        pts,
-        dtype=np.float64,
-    )
-
-    center = np.mean(
-        pts,
-        axis=0,
-    )
-
-    # Add the anatomical center as the strongest treatment control.
-    center_direction = _zone_direction(
-        center,
-        zone,
-        side,
-        nose_bridge,
-        face_x_axis,
-        face_y_axis,
-    )
-
-    center_displacement = _zone_displacement(
-        point=center,
-        zone_center=center,
-        volume_ml=volume_ml,
-        multiplier=multiplier,
-        sigma=sigma,
-        px_per_ml=px_per_ml,
-        direction=center_direction,
-        max_displacement=max_displacement,
-    )
-
-    src_points.append(center.copy())
-    dst_points.append(
-        center + center_displacement
-    )
-
-    # Add individual anatomical points.
-    for point in pts:
-        direction = _zone_direction(
-            point,
-            zone,
-            side,
-            nose_bridge,
-            face_x_axis,
-            face_y_axis,
-        )
-
-        displacement = _zone_displacement(
-            point=point,
-            zone_center=center,
-            volume_ml=volume_ml,
-            multiplier=multiplier,
-            sigma=sigma,
-            px_per_ml=px_per_ml,
-            direction=direction,
-            max_displacement=max_displacement,
-        )
-
-        src_points.append(point.copy())
-        dst_points.append(
-            point + displacement
-        )
-
-    return (
-        center,
-        center + center_displacement,
-    )
-
-
-def _constrain_map_around_protected_region(
-    map_x: np.ndarray,
-    map_y: np.ndarray,
-    protected_mask: np.ndarray | None,
-    feather_px: int = 6,
-) -> tuple[np.ndarray, np.ndarray]:
-    """
-    Keep protected pixels identity-mapped and smoothly transition the warp
-    outside the protected boundary. This prevents objects such as glasses
-    from participating in the RBF deformation itself.
-    """
-    if protected_mask is None:
-        return map_x, map_y
-
-    if protected_mask.shape != map_x.shape:
-        raise ValueError(
-            "protected_mask must match the local deformation grid shape."
-        )
-
-    protected = (protected_mask > 0).astype(np.uint8)
-    if not np.any(protected):
-        return map_x, map_y
-
-    feather_px = max(1, int(feather_px))
-
-    # Safety buffer around the object.
-    kernel_size = 2 * feather_px + 1
-    kernel = cv2.getStructuringElement(
-        cv2.MORPH_ELLIPSE,
-        (kernel_size, kernel_size),
-    )
-    protected = cv2.dilate(
-        protected,
-        kernel,
-        iterations=1,
-    )
-
-    # Distance from the protected region. Inside = 0, outside increases.
-    distance = cv2.distanceTransform(
-        (protected == 0).astype(np.uint8),
-        cv2.DIST_L2,
-        3,
-    )
-
-    t = np.clip(
-        distance / float(feather_px),
-        0.0,
-        1.0,
-    )
-
-    # Smoothstep transition: identity near object, full RBF farther away.
-    t = t * t * (3.0 - 2.0 * t)
-
-    h, w = map_x.shape
-    identity_x, identity_y = np.meshgrid(
-        np.arange(w, dtype=np.float32),
-        np.arange(h, dtype=np.float32),
-    )
-
-    constrained_x = (
-        identity_x * (1.0 - t)
-        + map_x * t
-    ).astype(np.float32)
-    constrained_y = (
-        identity_y * (1.0 - t)
-        + map_y * t
-    ).astype(np.float32)
-
-    return constrained_x, constrained_y
-
-
-def _process_side(
-    image: np.ndarray,
-    side_key: str,
-    ck1_pts: np.ndarray,
-    ck2_pts: np.ndarray,
-    ck3_pts: np.ndarray,
-    lateral_volume_ck1: float,
-    medial_volume_ck2: float,
-    submalar_volume_ck3: float,
-    multiplier: float,
-    nose_bridge: np.ndarray,
-    face_x_axis: np.ndarray,
-    face_y_axis: np.ndarray,
-    sigma: float,
-    px_per_ml: float,
-    face_scale: float,
-    local_anchors: np.ndarray,
-    w: int,
-    h: int,
-    glasses_mask: np.ndarray | None = None,
-) -> tuple[
-    np.ndarray,
-    np.ndarray,
-    float,
-    tuple[int, int, int, int],
-]:
-    """
-    Perform isolated RBF deformation for one cheek.
-    """
-
-    src_points: list[np.ndarray] = []
-    dst_points: list[np.ndarray] = []
-
-    # ---------------------------------------------------------
-    # 1. Treatment control points
-    # ---------------------------------------------------------
-
-    _, _ = _append_zone_controls(
-        src_points,
-        dst_points,
-        ck1_pts,
-        lateral_volume_ck1,
-        multiplier,
-        "ck1",
-        side_key,
-        nose_bridge,
-        face_x_axis,
-        face_y_axis,
-        sigma,
-        px_per_ml,
-        MAX_CK1_DISPLACEMENT * face_scale,
-    )
-
-    ck2_center, ck2_displaced = _append_zone_controls(
-        src_points,
-        dst_points,
-        ck2_pts,
-        medial_volume_ck2,
-        multiplier,
-        "ck2",
-        side_key,
-        nose_bridge,
-        face_x_axis,
-        face_y_axis,
-        sigma,
-        px_per_ml,
-        MAX_CK2_DISPLACEMENT * face_scale,
-    )
-
-    _, _ = _append_zone_controls(
-        src_points,
-        dst_points,
-        ck3_pts,
-        submalar_volume_ck3,
-        multiplier,
-        "ck3",
-        side_key,
-        nose_bridge,
-        face_x_axis,
-        face_y_axis,
-        sigma,
-        px_per_ml,
-        MAX_CK3_DISPLACEMENT * face_scale,
-    )
-
-    # ---------------------------------------------------------
-    # 2. Hard anatomical anchors
-    # ---------------------------------------------------------
-
-    if local_anchors is not None:
-        for anchor in np.asarray(
-            local_anchors,
-            dtype=np.float64,
-        ):
-            src_points.append(anchor.copy())
-            dst_points.append(anchor.copy())
-
-    # ---------------------------------------------------------
-    # 3. Compute local geometric ROI
-    # ---------------------------------------------------------
-
-    all_source = np.asarray(
-        src_points,
-        dtype=np.float64,
-    )
-
-    if len(all_source) < 4:
-        return (
-            image.copy(),
-            ck2_center,
-            0.0,
-            (0, w, 0, h),
-        )
-
-    x_min = max(
-        0,
-        int(
-            np.floor(
-                np.min(all_source[:, 0])
-                - ROI_PADDING_PX
-            )
-        ),
-    )
-
-    x_max = min(
-        w,
-        int(
-            np.ceil(
-                np.max(all_source[:, 0])
-                + ROI_PADDING_PX
-            )
-        ),
-    )
-
-    y_min = max(
-        0,
-        int(
-            np.floor(
-                np.min(all_source[:, 1])
-                - ROI_PADDING_PX
-            )
-        ),
-    )
-
-    y_max = min(
-        h,
-        int(
-            np.ceil(
-                np.max(all_source[:, 1])
-                + ROI_PADDING_PX
-            )
-        ),
-    )
-
-    roi_w = x_max - x_min
-    roi_h = y_max - y_min
-
-    if roi_w < 10 or roi_h < 10:
-        return (
-            image[y_min:y_max, x_min:x_max].copy(),
-            ck2_center,
-            0.0,
-            (x_min, x_max, y_min, y_max),
-        )
-
-    # ---------------------------------------------------------
-    # 4. Frozen ROI perimeter
-    # ---------------------------------------------------------
-
-    perimeter = _perimeter_points(
-        x_min,
-        x_max - 1,
-        y_min,
-        y_max - 1,
-        n=8,
-    )
-
-    for point in perimeter:
-        src_points.append(point.copy())
-        dst_points.append(point.copy())
-
-    src = np.asarray(
-        src_points,
-        dtype=np.float64,
-    )
-
-    dst = np.asarray(
-        dst_points,
-        dtype=np.float64,
-    )
-
-    # ---------------------------------------------------------
-    # 5. Remove duplicate control pairs
-    # ---------------------------------------------------------
-
-    pair_data = np.hstack(
-        [src, dst]
-    )
-
-    _, unique_indices = np.unique(
-        np.round(pair_data, decimals=4),
-        axis=0,
-        return_index=True,
-    )
-
-    unique_indices = np.sort(
-        unique_indices
-    )
-
-    src = src[unique_indices]
-    dst = dst[unique_indices]
-
-    if len(src) < 4:
-        return (
-            image[y_min:y_max, x_min:x_max].copy(),
-            ck2_center,
-            0.0,
-            (x_min, x_max, y_min, y_max),
-        )
-
-    # ---------------------------------------------------------
-    # 6. Calculate CK2 displacement for refinement
-    # ---------------------------------------------------------
-
-    ck2_shift = float(
-        np.linalg.norm(
-            ck2_displaced - ck2_center
-        )
-    )
-
-    # ---------------------------------------------------------
-    # 7. Normalize coordinates
-    # ---------------------------------------------------------
-
-    max_dim = max(
-        float(w),
-        float(h),
-        1.0,
-    )
-
-    src_norm = src / max_dim
-    dst_norm = dst / max_dim
-
-    # ---------------------------------------------------------
-    # 8. Inverse RBF
-    #
-    # Forward:
-    #       source → destination
-    #
-    # Image sampling requires:
-    #       destination → source
-    #
-    # Therefore the RBF is fitted in the inverse direction.
-    # ---------------------------------------------------------
-
-    rbf_x = Rbf(
-        dst_norm[:, 0],
-        dst_norm[:, 1],
-        src_norm[:, 0],
-        function="multiquadric",
-        smooth=RBF_SMOOTH,
-    )
-
-    rbf_y = Rbf(
-        dst_norm[:, 0],
-        dst_norm[:, 1],
-        src_norm[:, 1],
-        function="multiquadric",
-        smooth=RBF_SMOOTH,
-    )
-
-    # ---------------------------------------------------------
-    # 9. Generate target sampling grid
-    # ---------------------------------------------------------
-
-    grid_x, grid_y = np.meshgrid(
-        np.arange(roi_w, dtype=np.float64),
-        np.arange(roi_h, dtype=np.float64),
-    )
-
-    target_x_norm = (
-        grid_x + x_min
-    ) / max_dim
-
-    target_y_norm = (
-        grid_y + y_min
-    ) / max_dim
-
-    source_x = (
-        rbf_x(
-            target_x_norm,
-            target_y_norm,
-        )
-        * max_dim
-    )
-
-    source_y = (
-        rbf_y(
-            target_x_norm,
-            target_y_norm,
-        )
-        * max_dim
-    )
-
-    # Convert absolute coordinates into local ROI coordinates.
-    map_x = (
-        source_x - x_min
-    ).astype(np.float32)
-
-    map_y = (
-        source_y - y_min
-    ).astype(np.float32)
-
-    # IMPORTANT: constrain the deformation field itself around protected
-    # objects. Restoring pixels after remap is not sufficient because the
-    # surrounding skin can still be stretched around the object boundary.
-    local_protected = None
+    e = float(np.clip(scale, 0.8, 1.2))
+    return dict(spread=e, peak=1.0 - 0.6 * (e - 1.0), crisp=1.0 - 1.5 * (e - 1.0))
+
+
+def zone_sigma(z, ml: float) -> float:
+    """Larger boluses spread wider (also keeps the warp unfolded)."""
+    return z.sigma * (1.0 + 0.15 * float(np.clip(ml, 0.0, MAX_VOLUME_ML)))
+
+
+def side_half_weight(shape, lm: CheekLandmarks, side: str) -> np.ndarray:
+    """0 at/after the facial midline, 1 well inside this side. Keeps unilateral work on its own cheek."""
+    h, w = shape[:2]
+    yy, xx = np.mgrid[0:h, 0:w].astype(np.float32)
+    mid = lm.pts[6]
+    t = (xx - mid[0]) * lm.roll_u[0] + (yy - mid[1]) * lm.roll_u[1]      # + toward image-right
+    t = -t if side == "left" else t
+    r = np.clip((t - 0.08 * lm.scale) / (0.14 * lm.scale), 0.0, 1.0)
+    return (r * r * (3 - 2 * r)).astype(np.float32)
+
+
+def volume_to_px(ml: float, zone: str, scale: float, elasticity: float = 1.0) -> float:
+    """Peak displacement (px) for a volume, before the tissue-response factor (see effective_amp)."""
+    ml = float(np.clip(ml, 0.0, MAX_VOLUME_ML))
+    raw = (ml ** 0.8) * _MM_PER_ML[zone] * scale
+    cap = 0.16 * scale                      # soft ceiling: tissue can only bulge so far
+    return cap * float(np.tanh(raw / cap))
+
+
+def _poly_mask(shape, pts, dilate_px=0):
+    m = np.zeros(shape, np.uint8)
+    if pts is not None and len(pts) >= 3:
+        cv2.fillConvexPoly(m, cv2.convexHull(np.round(pts).astype(np.int32)), 255)
+    if dilate_px > 0:
+        k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * dilate_px + 1,) * 2)
+        m = cv2.dilate(m, k)
+    return m
+
+
+def build_protect_maps(shape, lm: CheekLandmarks, glasses_mask=None) -> dict:
+    """{zone: float32 [0,1]} - 1 = free to deform, 0 = frozen. Same frozen set for every zone,
+    different face-outline support (see _OUTLINE_FLOOR)."""
+    h, w = shape[:2]
+    s = lm.scale
+    frozen = np.zeros((h, w), np.uint8)
+
+    for sg in (lm.left, lm.right):
+        # eyelids + tear trough, extended downward under the lower lid
+        eye = _poly_mask((h, w), sg.eye_pts, dilate_px=int(0.04 * s))
+        trough = _poly_mask((h, w), np.vstack([sg.lower_lid, sg.lower_lid - sg.up * (0.10 * s)]), dilate_px=int(0.03 * s))
+        frozen |= eye | trough
+    frozen |= _poly_mask((h, w), lm.lips, dilate_px=int(0.10 * s))
+    for side in ("left", "right"):
+        frozen |= _poly_mask((h, w), lm.nose_wing[side], dilate_px=int(0.03 * s))
     if glasses_mask is not None:
-        local_protected = glasses_mask[
-            y_min:y_max,
-            x_min:x_max,
-        ]
+        gm = glasses_mask if glasses_mask.ndim == 2 else glasses_mask[..., 0]
+        frozen |= (gm > 127).astype(np.uint8) * 255
 
-    map_x, map_y = _constrain_map_around_protected_region(
-        map_x,
-        map_y,
-        local_protected,
-        feather_px=max(4, int(round(6 * face_scale))),
-    )
+    sig = max(3.0, 0.05 * s)
+    fz = cv2.GaussianBlur(frozen.astype(np.float32) / 255.0, (0, 0), sig)       # 0.5 on the (dilated) polygon edge
+    protect = _smooth((0.6 - fz) / 0.6)                                           # exactly 0 for fz >= 0.6: frozen core
 
-    map_x = np.clip(
-        map_x,
-        0.0,
-        float(roi_w - 1),
-    )
+    # Nothing above the eye line (brows, lids, temples) may move: smooth ramp starting just below the eyes.
+    yy, xx = np.mgrid[0:h, 0:w].astype(np.float32)
+    eye_mid = 0.5 * (lm.pts[33] + lm.pts[263])
+    t = (xx - eye_mid[0]) * lm.roll_v[0] + (yy - eye_mid[1]) * lm.roll_v[1]   # signed px below eye line
+    protect = protect * _smooth((t - 0.06 * s) / (0.14 * s))
 
-    map_y = np.clip(
-        map_y,
-        0.0,
-        float(roi_h - 1),
-    )
+    # Face-support: displacement is damped to `floor` AT the outline (skin is never dragged far over hair /
+    # background), rising to full strength ~0.10*scale inside it, fading to 0 just outside.
+    face = _poly_mask((h, w), lm.oval)
+    d_in = cv2.distanceTransform(face, cv2.DIST_L2, 3)
+    d_out = cv2.distanceTransform(255 - face, cv2.DIST_L2, 3)
+    t_in = _smooth(d_in / (0.10 * s))
+    t_out = _smooth(d_out / (0.05 * s))
+    out = {}
+    for name in ZONES:
+        floor = _OUTLINE_FLOOR[name]
+        support = np.where(face > 0, floor + (1 - floor) * t_in, floor * (1 - t_out)).astype(np.float32)
+        support = cv2.GaussianBlur(support, (0, 0), max(2.0, 0.02 * s))
+        out[name] = (protect * support).astype(np.float32)
+    return out
 
-    # ---------------------------------------------------------
-    # 10. Warp
-    # ---------------------------------------------------------
 
-    roi = image[
-        y_min:y_max,
-        x_min:x_max,
-    ]
+def build_protect_map(shape, lm: CheekLandmarks, glasses_mask=None) -> np.ndarray:
+    """Conservative single map (the lowest outline floor). Kept for callers that want one array."""
+    m = build_protect_maps(shape, lm, glasses_mask)
+    return np.minimum.reduce(list(m.values()))
 
-    warped_roi = cv2.remap(
-        roi,
-        map_x,
-        map_y,
-        interpolation=cv2.INTER_LINEAR,
-        borderMode=cv2.BORDER_REFLECT_101,
-    )
 
-    # ---------------------------------------------------------
-    # 11. Hard glasses restoration
-    # ---------------------------------------------------------
+def _smooth(x):
+    x = np.clip(x, 0.0, 1.0)
+    return x * x * (3 - 2 * x)
 
-    if glasses_mask is not None:
-        local_glasses = glasses_mask[
-            y_min:y_max,
-            x_min:x_max,
-        ]
 
-        warped_roi[
-            local_glasses > 0
-        ] = roi[
-            local_glasses > 0
-        ]
+def medial_weight(xx, yy, sg: SideGeometry, scale: float) -> np.ndarray:
+    """1 lateral to the mid-cheek safety line, fading to 0 about 0.12*scale medial to it."""
+    a, b = sg.medial_line
+    ch = (b - a) / max(float(np.linalg.norm(b - a)), 1e-6)
+    n = np.array([-ch[1], ch[0]], np.float32)
+    if float(n @ sg.outward) < 0:
+        n = -n
+    d = (xx - a[0]) * n[0] + (yy - a[1]) * n[1]            # + = lateral of the line
+    return _smooth((d + 0.12 * scale) / (0.20 * scale)).astype(np.float32)
 
-    return (
-        warped_roi,
-        ck2_displaced,
-        ck2_shift,
-        (
-            x_min,
-            x_max,
-            y_min,
-            y_max,
-        ),
-    )
+
+def zone_gate(xx, yy, z) -> np.ndarray:
+    """Smooth half-plane confinement of a zone (ck1: not below the arch, ck3: not above the apex)."""
+    if z.gate is None:
+        return 1.0
+    gates = z.gate if isinstance(z.gate, list) else [z.gate]
+    out = 1.0
+    for n, ref, offset, width in gates:
+        d = (xx - ref[0]) * n[0] + (yy - ref[1]) * n[1]
+        out = out * _smooth((d + offset) / max(width, 1e-6))
+    return out.astype(np.float32) if hasattr(out, "astype") else out
+
+
+def zone_weight(xx, yy, z, ml: float, widen: float = 1.0):
+    """Elliptical Gaussian footprint of a zone x its gate. Returns (g, na, nb, axis): weight and the
+    normalised offsets along / across the zone axis (dimensionless, ~1 at one sigma)."""
+    ax = z.axis if z.axis is not None else np.array([1.0, 0.0], np.float32)
+    sb = zone_sigma(z, ml) * widen
+    sa = sb * float(max(z.aspect, 1.0))
+    rx, ry = xx - z.center[0], yy - z.center[1]
+    a = rx * ax[0] + ry * ax[1]
+    b = -rx * ax[1] + ry * ax[0]
+    na, nb = a / sa, b / sb
+    g = np.exp(-0.5 * (na * na + nb * nb)) * zone_gate(xx, yy, z)
+    return g.astype(np.float32), na.astype(np.float32), nb.astype(np.float32), ax
+
+
+def effective_amp(z, ml: float, scale: float, elasticity: float = 1.0) -> float:
+    """Peak displacement (px). CK3 is a concavity correction, so it is bounded by how deep the hollow
+    really is: with no measurable hollow only a small residual smoothing remains."""
+    amp = volume_to_px(ml, z.name, scale) * elasticity_response(elasticity)["peak"]
+    if z.name == "ck3":
+        amp = min(amp, 0.35 * amp + 1.1 * float(z.hollow_px))
+    return amp
+
+
+def side_field(shape, sg: SideGeometry, lm: CheekLandmarks, volumes: dict[str, float],
+               zone_protect: dict, elasticity: float = 1.0):
+    """One side. Returns dict(dx, dy, height, fill, transition, peak_px).
+
+    height      projection bump (ck1 + ck2) -> crest highlight / lit-shade-side shading
+    fill        concavity-fill footprint (ck3) -> shadow softening ONLY (never a highlight)
+    transition  ck2 under-eye -> cheek blend footprint (upper half) -> shadow softening
+    """
+    scale = lm.scale
+    h, w = shape[:2]
+    yy, xx = np.mgrid[0:h, 0:w].astype(np.float32)
+    dx = np.zeros((h, w), np.float32)
+    dy = np.zeros((h, w), np.float32)
+    height = np.zeros((h, w), np.float32)
+    fill = np.zeros((h, w), np.float32)
+    transition = np.zeros((h, w), np.float32)
+    peak_px = {}
+    half = side_half_weight(shape, lm, sg.side) * medial_weight(xx, yy, sg, scale)
+    for name, z in sg.zones.items():
+        ml = volumes.get(name, 0.0)
+        if ml <= 1e-4:
+            peak_px[name] = 0.0
+            continue
+        amp = effective_amp(z, ml, scale, elasticity)
+        peak_px[name] = amp
+        spread = elasticity_response(elasticity)["spread"]
+        g, na, nb, ax = zone_weight(xx, yy, z, ml, widen=spread)
+        gp = g * half * zone_protect[name]
+        mix = _MIX[name]
+        # radial term, in the zone's own elliptical frame: tissue expands away from the bolus (forward dome)
+        bx = na * ax[0] - nb * ax[1]
+        by = na * ax[1] + nb * ax[0]
+        # never push tissue MEDIALLY (toward the nasolabial fold / nose): damp that half of the dome. Without this the
+        # medial side compresses against the safety-line cut-off and leaves a vertical crease.
+        c = bx * sg.outward[0] + by * sg.outward[1]
+        cm = np.minimum(c, 0.0) * 0.75
+        bx = bx - cm * sg.outward[0]
+        by = by - cm * sg.outward[1]
+        dx += gp * amp * (mix["radial"] * bx + mix["push"] * z.push_dir[0])
+        dy += gp * amp * (mix["radial"] * by + mix["push"] * z.push_dir[1])
+        if name == "ck3":
+            fill += gp * float(np.clip(ml, 0.0, 1.0))
+        else:
+            height += gp * amp
+        if name == "ck2":
+            # under-eye -> cheek blend: wider footprint, upper half only (photometric, no displacement)
+            gt = zone_weight(xx, yy, z, ml, widen=1.5 * spread)[0]
+            rx, ry = xx - z.center[0], yy - z.center[1]
+            up_w = _smooth((-(rx * lm.roll_v[0] + ry * lm.roll_v[1]) + 0.05 * scale) / (0.15 * scale))
+            transition += gt * up_w * half * zone_protect[name]
+    return dict(dx=dx, dy=dy, height=height, fill=fill, transition=transition, peak_px=peak_px)
+
+
+def _fix_folds(dx, dy, min_det=0.35):
+    """Backward map src = p - d folds where det(I - J(d)) <= 0. Scale d down until min det >= min_det."""
+    def mindet(k):
+        a = np.gradient(dx * k, axis=1); b = np.gradient(dx * k, axis=0)
+        c = np.gradient(dy * k, axis=1); d = np.gradient(dy * k, axis=0)
+        return float(((1 - a) * (1 - d) - b * c).min())
+    if mindet(1.0) >= min_det:
+        return dx, dy, 1.0
+    lo, hi = 0.0, 1.0
+    for _ in range(12):
+        mid = (lo + hi) / 2
+        if mindet(mid) >= min_det:
+            lo = mid
+        else:
+            hi = mid
+    return dx * lo, dy * lo, lo
 
 
 def apply_cheek_deformation(
     image: np.ndarray,
-    landmarks: CheekLandmarks,
+    lm: CheekLandmarks,
     *,
+    volumes_left: dict[str, float],
+    volumes_right: dict[str, float],
     glasses_mask: np.ndarray | None = None,
-    lateral_volume_ck1: float = 1.0,
-    medial_volume_ck2: float = 0.5,
-    submalar_volume_ck3: float = 0.0,
-    asymmetry_mode: bool = False,
-    left_cheek_multiplier: float = 1.0,
-    right_cheek_multiplier: float = 1.0,
-    skin_elasticity: float = 1.0,
-    side: str = "bilateral",
-) -> tuple[
-    np.ndarray,
-    tuple[np.ndarray, np.ndarray],
-    tuple[float, float],
-    tuple[np.ndarray, np.ndarray],
-]:
+    elasticity: float = 1.0,
+):
     """
-    Apply isolated RBF-based cheek deformation.
-
-    Returns
-    -------
-    deformed_image
-    apexes
-        Displaced left/right CK2 apexes.
-    shifts_px
-        Actual left/right CK2 displacement magnitude.
-    anchors
-        Preserved global anchors.
+    Returns dict(image, dx, dy, height, fill, transition, protect, zone_protect,
+                 peak_left, peak_right, fold_scale)
+    Left and right fields are computed independently and summed, so a
+    unilateral treatment never leaks to the other cheek.
     """
-
-    if side not in {
-        "left",
-        "right",
-        "bilateral",
-    }:
-        raise ValueError(
-            "side must be 'left', 'right', or 'bilateral'."
-        )
-
     h, w = image.shape[:2]
+    zone_protect = build_protect_maps((h, w), lm, glasses_mask)
 
-    deformed = image.copy()
+    L = side_field((h, w), lm.left, lm, volumes_left, zone_protect, elasticity)
+    R = side_field((h, w), lm.right, lm, volumes_right, zone_protect, elasticity)
 
-    # ---------------------------------------------------------
-    # Face scale
-    # ---------------------------------------------------------
+    # fold fix PER SIDE: the two fields have disjoint support, and a stronger (asymmetry-boosted) side must
+    # never shrink the reference side.
+    dxl, dyl, kl = _fix_folds(L["dx"], L["dy"])
+    dxr, dyr, kr = _fix_folds(R["dx"], R["dy"])
+    dx, dy, k = dxl + dxr, dyl + dyr, min(kl, kr)
+    height = L["height"] * kl + R["height"] * kr
+    fill = L["fill"] + R["fill"]
+    transition = L["transition"] + R["transition"]
 
-    eye_left = landmarks.anchors[0]
-    eye_right = landmarks.anchors[2]
-
-    face_scale = _face_scale(
-        eye_left,
-        eye_right,
-    )
-
-    # ---------------------------------------------------------
-    # Visual deformation calibration
-    # ---------------------------------------------------------
-
-    px_per_ml = (
-        PX_PER_ML_AT_REFERENCE_FACE
-        * face_scale
-    )
-
-    elasticity = float(
-        np.clip(
-            skin_elasticity,
-            0.5,
-            1.5,
-        )
-    )
-
-    sigma = (
-        BASE_SIGMA_PX
-        * face_scale
-        * np.clip(
-            elasticity,
-            0.8,
-            1.2,
-        )
-    )
-
-    # ---------------------------------------------------------
-    # Face coordinate system
-    # ---------------------------------------------------------
-
-    nose_bridge = (
-        landmarks.nose_bridge
-        .astype(np.float64)
-    )
-
-    face_x_axis = _normalize_vec(
-        (
-            eye_right
-            - eye_left
-        ).astype(np.float64)
-    )
-
-    if np.linalg.norm(face_x_axis) < 1e-8:
-        face_x_axis = np.array(
-            [1.0, 0.0],
-            dtype=np.float64,
-        )
-
-    face_y_axis = np.array(
-        [
-            -face_x_axis[1],
-            face_x_axis[0],
-        ],
-        dtype=np.float64,
-    )
-
-    # ---------------------------------------------------------
-    # Asymmetry
-    # ---------------------------------------------------------
-
-    left_multiplier = (
-        left_cheek_multiplier
-        if asymmetry_mode
-        else 1.0
-    )
-
-    right_multiplier = (
-        right_cheek_multiplier
-        if asymmetry_mode
-        else 1.0
-    )
-
-    left_apex = (
-        landmarks.left_apex.copy()
-    )
-
-    right_apex = (
-        landmarks.right_apex.copy()
-    )
-
-    left_shift = 0.0
-    right_shift = 0.0
-
-    # ---------------------------------------------------------
-    # Left cheek
-    # ---------------------------------------------------------
-
-    if side in {"left", "bilateral"}:
-
-        (
-            warped,
-            left_apex,
-            left_shift,
-            bounds,
-        ) = _process_side(
-            image=image,
-            side_key="left",
-            ck1_pts=landmarks.left_ck1,
-            ck2_pts=landmarks.left_ck2,
-            ck3_pts=landmarks.left_ck3,
-            lateral_volume_ck1=lateral_volume_ck1,
-            medial_volume_ck2=medial_volume_ck2,
-            submalar_volume_ck3=submalar_volume_ck3,
-            multiplier=left_multiplier,
-            nose_bridge=nose_bridge,
-            face_x_axis=face_x_axis,
-            face_y_axis=face_y_axis,
-            sigma=sigma,
-            px_per_ml=px_per_ml,
-            face_scale=face_scale,
-            local_anchors=landmarks.left_local_anchors,
-            w=w,
-            h=h,
-            glasses_mask=glasses_mask,
-        )
-
-        x0, x1, y0, y1 = bounds
-
-        if x1 > x0 and y1 > y0:
-            deformed[
-                y0:y1,
-                x0:x1,
-            ] = warped
-
-    # ---------------------------------------------------------
-    # Right cheek
-    # ---------------------------------------------------------
-
-    if side in {"right", "bilateral"}:
-
-        (
-            warped,
-            right_apex,
-            right_shift,
-            bounds,
-        ) = _process_side(
-            image=image,
-            side_key="right",
-            ck1_pts=landmarks.right_ck1,
-            ck2_pts=landmarks.right_ck2,
-            ck3_pts=landmarks.right_ck3,
-            lateral_volume_ck1=lateral_volume_ck1,
-            medial_volume_ck2=medial_volume_ck2,
-            submalar_volume_ck3=submalar_volume_ck3,
-            multiplier=right_multiplier,
-            nose_bridge=nose_bridge,
-            face_x_axis=face_x_axis,
-            face_y_axis=face_y_axis,
-            sigma=sigma,
-            px_per_ml=px_per_ml,
-            face_scale=face_scale,
-            local_anchors=landmarks.right_local_anchors,
-            w=w,
-            h=h,
-            glasses_mask=glasses_mask,
-        )
-
-        x0, x1, y0, y1 = bounds
-
-        if x1 > x0 and y1 > y0:
-            deformed[
-                y0:y1,
-                x0:x1,
-            ] = warped
-
-    return (
-        deformed,
-        (
-            left_apex,
-            right_apex,
-        ),
-        (
-            left_shift,
-            right_shift,
-        ),
-        (
-            landmarks.anchors,
-            landmarks.anchors,
-        ),
-    )
+    yy, xx = np.mgrid[0:h, 0:w].astype(np.float32)
+    out = cv2.remap(image, xx - dx, yy - dy, cv2.INTER_CUBIC, borderMode=cv2.BORDER_REFLECT_101)
+    return dict(image=out, dx=dx, dy=dy, height=height, fill=fill, transition=transition,
+                protect=np.maximum.reduce(list(zone_protect.values())), zone_protect=zone_protect,
+                peak_left=L["peak_px"], peak_right=R["peak_px"], fold_scale=k)

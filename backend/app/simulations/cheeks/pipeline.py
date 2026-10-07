@@ -1,401 +1,166 @@
 """
-Cheek simulation pipeline.
+End-to-end cheek filler simulation.
 
-End-to-end architecture
------------------------
-
-Input image
-    ↓
-Validation
-    ↓
-Face landmarks
-    ↓
-Cheek anatomical mapping
-    ↓
-Glasses detection
-    ↓
-Treatment mask
-    ↓
-Per-side RBF deformation
-    ↓
-Displacement-driven photometric refinement
-    ↓
-Anatomical alpha compositing
-    ↓
-Hard glasses restoration
-    ↓
-Leakage QA
-    ↓
-Final image
+    landmarks -> zone geometry -> volumes (per side/zone)
+              -> geometric deformation (protected: eyes, lips, nose wing, glasses)
+              -> blend mask -> photometric refinement -> result
 """
-
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import cv2
 import numpy as np
 
-from app.common.exceptions import (
-    DeformationError,
-    FaceNotDetectedError,
-    LandmarkExtractionError,
-)
-from app.common.face_detection import FaceDetector
-
-from app.simulations.cheeks.landmarks import (
-    extract_cheek_landmarks,
-)
-from app.simulations.cheeks.glasses import (
-    detect_glasses,
-)
-from app.simulations.cheeks.mask import (
-    build_cheek_mask,
-)
-from app.simulations.cheeks.deformation import (
-    apply_cheek_deformation,
-)
-from app.simulations.cheeks.refinement import (
-    refine_cheek_region,
-)
+from .landmarks import extract_cheek_landmarks
+from .deformation import apply_cheek_deformation, elasticity_response, MAX_VOLUME_ML
+from .mask import build_cheek_mask
+from .refinement import refine_cheek_region
 
 logger = logging.getLogger(__name__)
 
+# The UI talks about the PATIENT's left/right cheek. In a normal (non-mirrored)
+# photo the patient's left cheek is on the IMAGE right. The engine works in
+# image-sides internally, so API-level sides are swapped when this is True.
+PATIENT_SIDE_IS_MIRRORED = True
 
-VALID_SIDES = {
-    "left",
-    "right",
-    "bilateral",
-}
-
-
-VOLUME_LIMITS = {
-    "lateral_volume_ck1": (0.0, 2.5),
-    "medial_volume_ck2": (0.0, 2.5),
-    "submalar_volume_ck3": (0.0, 2.0),
-}
-
-# Protected objects need a small safety buffer so the deformation field and
-# photometric refinement do not pull or brighten pixels immediately beside them.
-GLASSES_SAFETY_DILATION_PX = 18
+# Heavy per-pixel maths runs on the face region only, capped to this size.
+MAX_PROCESS_PX = 1400
 
 
 @dataclass
 class CheeksSimulationConfig:
-    """Configuration parameters for cheek simulation."""
-
-    lateral_volume_ck1: float = 1.0
-    medial_volume_ck2: float = 0.5
-    submalar_volume_ck3: float = 0.0
-
+    lateral_volume_ck1: float = 1.0      # mL per side
+    medial_volume_ck2: float = 0.6       # mL per side (malar apex)
+    submalar_volume_ck3: float = 0.0     # mL per side
+    side: str = "bilateral"              # "left" | "right" | "bilateral"  (image side)
     asymmetry_mode: bool = False
-
     left_cheek_multiplier: float = 1.0
     right_cheek_multiplier: float = 1.0
-
-    skin_elasticity: float = 1.0
-
-    show_outline: bool = False
-
-    side: str = "bilateral"
+    skin_elasticity: float = 1.0         # UI 'Skin Elasticity Scale' 0.8 tight/youthful (localised, crisp) .. 1.2 mature/lax (broad, soft)
+    shading_gain: float = 1.0
+    # explicit per-side volumes (IMAGE sides), e.g. {"left": {"ck1": 2.0, "ck2": 0, "ck3": 0}, "right": {...}}.
+    # When given, it replaces the shared volumes / side / multipliers: each cheek gets exactly what was requested.
+    side_volumes: dict | None = None
 
 
 @dataclass
 class CheeksSimulationResult:
-    """Result of the cheek simulation."""
-
-    image: np.ndarray | None = None
-
-    success: bool = False
-
-    message: str = ""
-
-
-def _validate_config(
-    side: str,
-    **volumes: float,
-) -> None:
-    """Validate simulation configuration."""
-
-    if side not in VALID_SIDES:
-        raise DeformationError(
-            f"Invalid side '{side}'. "
-            f"Must be one of {VALID_SIDES}."
-        )
-
-    for name, value in volumes.items():
-
-        if name not in VOLUME_LIMITS:
-            raise DeformationError(
-                f"Unknown volume parameter '{name}'."
-            )
-
-        lo, hi = VOLUME_LIMITS[name]
-
-        if not (
-            np.isfinite(value)
-            and lo <= value <= hi
-        ):
-            raise DeformationError(
-                f"{name}={value} is outside "
-                f"the supported range [{lo}, {hi}]."
-            )
+    image: np.ndarray
+    mask: np.ndarray
+    peak_shift_px: tuple[float, float]
+    total_volume_ml: float
+    warnings: list[str] = field(default_factory=list)
+    debug: dict = field(default_factory=dict)
 
 
-def _build_zone_activity(
-    lateral_volume_ck1: float,
-    medial_volume_ck2: float,
-    submalar_volume_ck3: float,
-) -> dict[str, bool]:
-    """Return active CK zones for both sides."""
-
-    return {
-        "left_ck1": lateral_volume_ck1 > 0.0,
-        "left_ck2": medial_volume_ck2 > 0.0,
-        "left_ck3": submalar_volume_ck3 > 0.0,
-        "right_ck1": lateral_volume_ck1 > 0.0,
-        "right_ck2": medial_volume_ck2 > 0.0,
-        "right_ck3": submalar_volume_ck3 > 0.0,
-    }
+def _volumes(cfg: CheeksSimulationConfig, side: str) -> dict:
+    if cfg.side_volumes is not None:
+        sv = cfg.side_volumes.get(side) or {}
+        return {k: float(np.clip(float(sv.get(k, 0.0)), 0.0, MAX_VOLUME_ML)) for k in ("ck1", "ck2", "ck3")}
+    active = cfg.side in ("bilateral", side)
+    if not active:
+        return {"ck1": 0.0, "ck2": 0.0, "ck3": 0.0}
+    m = 1.0
+    if cfg.asymmetry_mode:
+        m = cfg.left_cheek_multiplier if side == "left" else cfg.right_cheek_multiplier
+    cap = lambda v: float(np.clip(v * m, 0.0, MAX_VOLUME_ML))
+    return {"ck1": cap(cfg.lateral_volume_ck1), "ck2": cap(cfg.medial_volume_ck2),
+            "ck3": cap(cfg.submalar_volume_ck3)}
 
 
-def _build_blending_mask(
-    treatment_mask: np.ndarray,
-    side: str,
-    protected_mask: np.ndarray | None = None,
-) -> np.ndarray:
-    """
-    Convert the anatomical treatment mask into the final compositing mask.
-    """
+def run_cheeks_simulation(image: np.ndarray, face_landmarks: np.ndarray,
+                          config: CheeksSimulationConfig | None = None,
+                          glasses_mask: np.ndarray | None = None) -> CheeksSimulationResult:
+    cfg = config or CheeksSimulationConfig()
+    if cfg.side not in ("left", "right", "bilateral"):
+        raise ValueError("side must be 'left', 'right' or 'bilateral'")
+    if image is None or image.ndim != 3 or image.shape[2] != 3:
+        raise ValueError("image must be an HxWx3 BGR uint8 array")
 
-    if side == "bilateral":
+    warnings: list[str] = []
+    lm = extract_cheek_landmarks(face_landmarks)
+    vl, vr = _volumes(cfg, "left"), _volumes(cfg, "right")
+    total = sum(vl.values()) + sum(vr.values())
 
-        erosion_kernel = cv2.getStructuringElement(
-            cv2.MORPH_ELLIPSE,
-            (7, 7),
-        )
+    # yaw sanity: nose bridge should sit near the midpoint of the cheeks' edges
+    p = lm.pts
+    dl, dr = abs(p[1][0] - p[234][0]), abs(p[454][0] - p[1][0])
+    if min(dl, dr) / max(dl, dr, 1.0) < 0.6:
+        warnings.append("Head is turned noticeably; results are most realistic on near-frontal photos.")
 
-        mask = cv2.erode(
-            treatment_mask,
-            erosion_kernel,
-            iterations=1,
-        )
+    # clinical sanity: typical midface totals are ~1-3 mL PER SIDE (deep 0.7-2.4 + superficial); beyond that
+    # the result looks overfilled ("pillow face") and the simulation is no longer representative.
+    for nm, vv in (("left", vl), ("right", vr)):
+        if sum(vv.values()) > 3.0:
+            warnings.append(f"{nm.capitalize()} cheek total {sum(vv.values()):.1f} mL exceeds the usual 1-3 mL per side; "
+                            "risk of an overfilled look.")
 
-        mask = cv2.GaussianBlur(
-            mask,
-            (15, 15),
-            0,
-        )
+    if total <= 1e-4:
+        return CheeksSimulationResult(image.copy(), np.zeros(image.shape[:2], np.uint8), (0.0, 0.0), 0.0, warnings)
 
-    else:
-
-        mask = cv2.GaussianBlur(
-            treatment_mask,
-            (21, 21),
-            0,
-        )
-
-    # Gaussian feathering can reintroduce non-zero alpha inside an excluded
-    # object. Re-apply the hard protected region after every blur/erosion step.
-    if protected_mask is not None:
-        mask = mask.copy()
-        mask[protected_mask > 0] = 0
-
-    return mask
-
-
-def _build_protected_mask(
-    glasses_mask: np.ndarray | None,
-    dilation_px: int = GLASSES_SAFETY_DILATION_PX,
-) -> np.ndarray | None:
-    """Build the hard protected region used by deformation and refinement."""
-    if glasses_mask is None:
-        return None
-
-    kernel_size = 2 * int(dilation_px) + 1
-    kernel = cv2.getStructuringElement(
-        cv2.MORPH_ELLIPSE,
-        (kernel_size, kernel_size),
-    )
-
-    return cv2.dilate(
-        glasses_mask,
-        kernel,
-        iterations=1,
-    )
+    d = apply_cheek_deformation(image, lm, volumes_left=vl, volumes_right=vr,
+                                glasses_mask=glasses_mask, elasticity=cfg.skin_elasticity)
+    mask = build_cheek_mask(image.shape, lm, d["zone_protect"], volumes_left=vl, volumes_right=vr,
+                            glasses_mask=glasses_mask, elasticity=cfg.skin_elasticity)
+    out = refine_cheek_region(d["image"], image, mask, lm, d["dx"], d["dy"], d["height"],
+                              fill=d["fill"], transition=d["transition"], shading_gain=cfg.shading_gain,
+                              crispness=elasticity_response(cfg.skin_elasticity)["crisp"])
+    if glasses_mask is not None:                       # frames / lenses stay bit-identical to the input
+        gm = glasses_mask if glasses_mask.ndim == 2 else glasses_mask[..., 0]
+        out[gm > 127] = image[gm > 127]
+    if d["fold_scale"] < 1.0:
+        warnings.append(f"Volume was auto-limited to {d['fold_scale']:.0%} to avoid distortion.")
+    pl = max(d["peak_left"].values(), default=0.0)
+    pr = max(d["peak_right"].values(), default=0.0)
+    return CheeksSimulationResult(out, mask, (float(pl), float(pr)), float(total), warnings,
+                                  debug={"dx": d["dx"], "dy": d["dy"], "protect": d["protect"], "zone_protect": d["zone_protect"],
+                                         "height": d["height"], "fill": d["fill"], "landmarks": lm})
 
 
-def _composite(
-    original: np.ndarray,
-    refined: np.ndarray,
-    blending_mask: np.ndarray,
-) -> np.ndarray:
-    """Alpha-composite refined cheek over the original image."""
-
-    alpha = (
-        blending_mask.astype(np.float32)
-        / 255.0
-    )
-
-    alpha = alpha[:, :, None]
-
-    output = (
-        refined.astype(np.float32)
-        * alpha
-        +
-        original.astype(np.float32)
-        * (1.0 - alpha)
-    )
-
-    return np.clip(
-        output,
-        0.0,
-        255.0,
-    ).astype(np.uint8)
+def _to_image_side(side: str) -> str:
+    if side == "bilateral" or not PATIENT_SIDE_IS_MIRRORED:
+        return side
+    return "right" if side == "left" else "left"
 
 
-def _restore_glasses(
-    output: np.ndarray,
-    original: np.ndarray,
-    glasses_mask: np.ndarray | None,
-) -> np.ndarray:
-    """Restore original glasses pixels exactly."""
-
-    if glasses_mask is None:
-        return output
-
-    restored = output.copy()
-
-    restored[
-        glasses_mask > 0
-    ] = original[
-        glasses_mask > 0
-    ]
-
-    return restored
+def _face_roi(shape, pts: np.ndarray, pad: float = 0.25) -> tuple[int, int, int, int]:
+    h, w = shape[:2]
+    x0, y0 = pts.min(axis=0)
+    x1, y1 = pts.max(axis=0)
+    p = pad * max(x1 - x0, y1 - y0)
+    return (max(0, int(x0 - p)), max(0, int(y0 - p)),
+            min(w, int(np.ceil(x1 + p))), min(h, int(np.ceil(y1 + p))))
 
 
-def _run_leakage_check(
-    original: np.ndarray,
-    output: np.ndarray,
-    blending_mask: np.ndarray,
-    side: str,
-) -> None:
-    """
-    Check whether unilateral treatment modified pixels outside
-    the final compositing mask.
-    """
-
-    if side == "bilateral":
-        return
-
-    diff = np.abs(
-        output.astype(np.int16)
-        - original.astype(np.int16)
-    )
-
-    outside = blending_mask < 5
-
-    if not np.any(outside):
-        return
-
-    max_leak = int(
-        diff[outside].max()
-    )
-
-    if max_leak > 3:
-        logger.warning(
-            "Cheek leakage check failed: "
-            "max outside-mask difference=%d, side=%s",
-            max_leak,
-            side,
-        )
+def _draw_modified_outline(img: np.ndarray, mask: np.ndarray, level: int = 96) -> np.ndarray:
+    """Thin white border around the area the simulation changed - same style as the lips overlay
+    (1px anti-aliased white polyline, blended at 60% opacity). The contour comes from the blend mask,
+    one closed line per modified region (one per cheek)."""
+    h, w = mask.shape[:2]
+    binary = (mask > level).astype(np.uint8) * 255
+    k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+    binary = cv2.morphologyEx(binary, cv2.MORPH_OPEN, k)
+    contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+    polys = []
+    for c in contours:
+        if cv2.contourArea(c) < 80:
+            continue
+        eps = max(0.75, 0.0015 * cv2.arcLength(c, True))
+        polys.append(cv2.approxPolyDP(c, eps, True).astype(np.int32))
+    if not polys:
+        return img
+    thick = max(1, int(round(min(h, w) / 1400)))        # 1px up to ~1400px images, scales for big photos
+    overlay = img.copy()
+    cv2.polylines(overlay, polys, isClosed=True, color=(255, 255, 255), thickness=thick, lineType=cv2.LINE_AA)
+    return cv2.addWeighted(overlay, 0.6, img, 0.4, 0)
 
 
-def _draw_outline(
+def run_cheeks_pipeline_detailed(
     image: np.ndarray,
-    landmarks,
-    side: str,
-) -> np.ndarray:
-    """Optional debug contour overlay."""
-
-    overlay = image.copy()
-
-    if side in {
-        "left",
-        "bilateral",
-    }:
-
-        cv2.polylines(
-            overlay,
-            [
-                landmarks.left_all.astype(
-                    np.int32
-                ).reshape((-1, 1, 2))
-            ],
-            isClosed=False,
-            color=(255, 255, 255),
-            thickness=1,
-            lineType=cv2.LINE_AA,
-        )
-
-        cv2.circle(
-            overlay,
-            (
-                int(landmarks.left_apex[0]),
-                int(landmarks.left_apex[1]),
-            ),
-            3,
-            (0, 230, 255),
-            -1,
-            lineType=cv2.LINE_AA,
-        )
-
-    if side in {
-        "right",
-        "bilateral",
-    }:
-
-        cv2.polylines(
-            overlay,
-            [
-                landmarks.right_all.astype(
-                    np.int32
-                ).reshape((-1, 1, 2))
-            ],
-            isClosed=False,
-            color=(255, 255, 255),
-            thickness=1,
-            lineType=cv2.LINE_AA,
-        )
-
-        cv2.circle(
-            overlay,
-            (
-                int(landmarks.right_apex[0]),
-                int(landmarks.right_apex[1]),
-            ),
-            3,
-            (0, 230, 255),
-            -1,
-            lineType=cv2.LINE_AA,
-        )
-
-    return cv2.addWeighted(
-        overlay,
-        0.65,
-        image,
-        0.35,
-        0,
-    )
-
-
-def run_cheeks_pipeline(
-    image: np.ndarray,
-    *,
     lateral_volume_ck1: float = 1.0,
-    medial_volume_ck2: float = 0.5,
+    medial_volume_ck2: float = 0.6,
     submalar_volume_ck3: float = 0.0,
     asymmetry_mode: bool = False,
     left_cheek_multiplier: float = 1.0,
@@ -403,290 +168,93 @@ def run_cheeks_pipeline(
     skin_elasticity: float = 1.0,
     show_outline: bool = False,
     side: str = "bilateral",
-    return_debug: bool = False,
-    face_detector: FaceDetector | None = None,
-) -> np.ndarray | tuple[np.ndarray, dict]:
-    """
-    Execute the complete cheek simulation pipeline.
-    """
-
-    if image is None:
-        raise DeformationError(
-            "Input image cannot be None."
-        )
-
-    if image.ndim != 3 or image.shape[2] != 3:
-        raise DeformationError(
-            "Expected a BGR image with shape HxWx3."
-        )
-
-    # ---------------------------------------------------------
-    # 1. Validate configuration
-    # ---------------------------------------------------------
-
-    _validate_config(
-        side,
-        lateral_volume_ck1=lateral_volume_ck1,
-        medial_volume_ck2=medial_volume_ck2,
-        submalar_volume_ck3=submalar_volume_ck3,
-    )
-
-    # ---------------------------------------------------------
-    # 2. Face landmarks
-    # ---------------------------------------------------------
-
-    if face_detector is None:
-        face_detector = FaceDetector()
-
-    try:
-        face_points = face_detector.get_landmarks(
-            image
-        )
-    except ValueError as exc:
-        raise FaceNotDetectedError(
-            str(exc)
-        ) from exc
-
-    try:
-        landmarks = extract_cheek_landmarks(
-            face_points
-        )
-    except ValueError as exc:
-        raise LandmarkExtractionError(
-            str(exc)
-        ) from exc
-
-    # ---------------------------------------------------------
-    # 3. Glasses detection
-    # ---------------------------------------------------------
-
-    glasses_detected, glasses_mask = detect_glasses(
-        image,
-        landmarks,
-    )
-
-    # Treat glasses as an immutable object, not merely as pixels to restore later.
-    protected_mask = _build_protected_mask(
-        glasses_mask,
-    )
-
-    # ---------------------------------------------------------
-    # 4. Early exit
-    # ---------------------------------------------------------
-
-    total_volume = (
-        lateral_volume_ck1
-        + medial_volume_ck2
-        + submalar_volume_ck3
-    )
-
-    if total_volume <= 1e-6:
-
-        if return_debug:
-
-            empty = np.zeros(
-                image.shape[:2],
-                dtype=np.uint8,
-            )
-
-            return image.copy(), {
-                "mask": empty,
-                "blending_mask": empty,
-                "glasses_mask": glasses_mask,
-                "glasses_detected": glasses_detected,
-            }
-
-        return image.copy()
-
-    # ---------------------------------------------------------
-    # 5. Active zones
-    # ---------------------------------------------------------
-
-    zone_active = _build_zone_activity(
-        lateral_volume_ck1,
-        medial_volume_ck2,
-        submalar_volume_ck3,
-    )
-
-    # ---------------------------------------------------------
-    # 6. Anatomical treatment mask
-    # ---------------------------------------------------------
-
-    treatment_mask = build_cheek_mask(
-        image.shape,
-        landmarks,
-        glasses_mask=protected_mask,
-        side=side,
-        zone_active=zone_active,
-        feather_radius=25,
-        dilate_px=8,
-    )
-
-    # ---------------------------------------------------------
-    # 7. RBF geometric deformation
-    # ---------------------------------------------------------
-
-    (
-        deformed_image,
-        apexes,
-        shifts_px,
-        _,
-    ) = apply_cheek_deformation(
-        image=image,
-        landmarks=landmarks,
-        glasses_mask=protected_mask,
-        lateral_volume_ck1=lateral_volume_ck1,
-        medial_volume_ck2=medial_volume_ck2,
-        submalar_volume_ck3=submalar_volume_ck3,
-        asymmetry_mode=asymmetry_mode,
-        left_cheek_multiplier=left_cheek_multiplier,
-        right_cheek_multiplier=right_cheek_multiplier,
-        skin_elasticity=skin_elasticity,
-        side=side,
-    )
-
-    # ---------------------------------------------------------
-    # 8. Final anatomical blending mask
-    # ---------------------------------------------------------
-
-    blending_mask = _build_blending_mask(
-        treatment_mask,
-        side,
-        protected_mask=protected_mask,
-    )
-
-    # ---------------------------------------------------------
-    # 9. Photometric refinement
-    # ---------------------------------------------------------
-
-    refined_image = refine_cheek_region(
-        deformed_image=deformed_image,
-        mask=blending_mask,
-        landmarks=landmarks,
-        apexes=apexes,
-        original_image=image,
-        medial_volume_ck2=medial_volume_ck2,
-        submalar_volume_ck3=submalar_volume_ck3,
-        asymmetry_mode=asymmetry_mode,
-        left_multiplier=left_cheek_multiplier,
-        right_multiplier=right_cheek_multiplier,
-        side=side,
-        shifts_px=shifts_px,
-    )
-
-    # ---------------------------------------------------------
-    # 10. Anatomical alpha composite
-    # ---------------------------------------------------------
-
-    final_image = _composite(
-        original=image,
-        refined=refined_image,
-        blending_mask=blending_mask,
-    )
-
-    # ---------------------------------------------------------
-    # 11. Hard glasses restoration
-    # ---------------------------------------------------------
-
-    if glasses_detected:
-        # Restore the entire protected corridor, not only the detected frame pixels.
-        # This removes residual warped/ghost frame pixels immediately beside the glasses.
-        final_image = _restore_glasses(
-            final_image,
-            image,
-            protected_mask,
-        )
-
-    # ---------------------------------------------------------
-    # 12. QA
-    # ---------------------------------------------------------
-
-    _run_leakage_check(
-        original=image,
-        output=final_image,
-        blending_mask=blending_mask,
-        side=side,
-    )
-
-    # ---------------------------------------------------------
-    # 13. Optional debug overlay
-    # ---------------------------------------------------------
-
-    if show_outline:
-        final_image = _draw_outline(
-            final_image,
-            landmarks,
-            side,
-        )
-
-    # ---------------------------------------------------------
-    # 14. Debug output
-    # ---------------------------------------------------------
-
-    if return_debug:
-
-        debug = {
-            "mask": treatment_mask,
-            "blending_mask": blending_mask,
-            "glasses_mask": glasses_mask,
-            "protected_mask": protected_mask,
-            "glasses_detected": glasses_detected,
-            "apexes": apexes,
-            "shifts_px": shifts_px,
-            "landmarks": landmarks,
-            "deformed_image": deformed_image,
-            "refined_image": refined_image,
-        }
-
-        return final_image, debug
-
-    return final_image
-
-
-async def run_cheeks_simulation(
-    image: np.ndarray,
-    config: CheeksSimulationConfig,
+    face_detector=None,
+    protect_glasses: bool = True,
+    volumes_by_side: dict | None = None,
 ) -> CheeksSimulationResult:
+    """Full pipeline: detect -> glasses mask -> ROI crop -> simulate -> paste back.
+
+    ``left``/``right`` (``side``, the multipliers and ``volumes_by_side``) refer to the PATIENT's
+    cheeks, matching the UI labels.
+
+    ``volumes_by_side`` = {"left": {"ck1": mL, "ck2": mL, "ck3": mL}, "right": {...}} gives every cheek its own
+    volumes (e.g. Left +2 mL / Right +0 mL, or Left 2 / Right 1). A missing/zero side is left bit-identical.
+    It overrides the shared volumes, ``side`` and the multipliers. The baseline asymmetry of the face is always
+    preserved: each side is deformed from its own landmarks, nothing is mirrored or symmetrised.
     """
-    Async wrapper around the synchronous cheek engine.
-    """
+    from .detector import detect_landmarks
+    from .glasses import detect_glasses
 
-    try:
+    if image is None or image.ndim != 3 or image.shape[2] != 3:
+        raise ValueError("image must be an HxWx3 BGR uint8 array")
 
-        result = run_cheeks_pipeline(
-            image=image,
-            lateral_volume_ck1=config.lateral_volume_ck1,
-            medial_volume_ck2=config.medial_volume_ck2,
-            submalar_volume_ck3=config.submalar_volume_ck3,
-            asymmetry_mode=config.asymmetry_mode,
-            left_cheek_multiplier=config.left_cheek_multiplier,
-            right_cheek_multiplier=config.right_cheek_multiplier,
-            skin_elasticity=config.skin_elasticity,
-            show_outline=config.show_outline,
-            side=config.side,
-        )
+    pts = detect_landmarks(image, face_detector).astype(np.float32)
 
-        output = (
-            result
-            if isinstance(result, np.ndarray)
-            else result[0]
-        )
+    # patient-side -> image-side
+    img_side = _to_image_side(side)
+    l_mult, r_mult = left_cheek_multiplier, right_cheek_multiplier
+    if PATIENT_SIDE_IS_MIRRORED:
+        l_mult, r_mult = r_mult, l_mult
+    cfg = CheeksSimulationConfig(
+        lateral_volume_ck1=lateral_volume_ck1, medial_volume_ck2=medial_volume_ck2,
+        submalar_volume_ck3=submalar_volume_ck3, side=img_side,
+        asymmetry_mode=asymmetry_mode, left_cheek_multiplier=l_mult,
+        right_cheek_multiplier=r_mult, skin_elasticity=float(np.clip(skin_elasticity, 0.8, 1.2)),
+    )
+    if volumes_by_side is not None:
+        pv = {s: volumes_by_side.get(s) or {} for s in ("left", "right")}
+        if PATIENT_SIDE_IS_MIRRORED:                         # patient side -> image side
+            pv = {"left": pv["right"], "right": pv["left"]}
+        cfg.side_volumes = pv
 
-        return CheeksSimulationResult(
-            image=output,
-            success=True,
-            message="Cheek simulation completed successfully.",
-        )
+    warnings: list[str] = []
+    glasses_full = None
+    if protect_glasses:
+        try:
+            found, gmask = detect_glasses(image, extract_cheek_landmarks(pts))
+            if found and gmask is not None:
+                k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
+                glasses_full = cv2.dilate(gmask, k)          # small safety margin around frames
+                warnings.append("Eyeglasses detected - frames were left untouched.")
+        except Exception:                                    # glasses are optional; never fail the sim
+            logger.exception("Glasses detection failed; continuing without it.")
 
-    except Exception as exc:
+    # ---- crop to face ROI (and cap size) -------------------------------
+    x0, y0, x1, y1 = _face_roi(image.shape, pts)
+    roi = image[y0:y1, x0:x1]
+    roi_pts = pts - np.array([x0, y0], np.float32)
+    roi_gl = None if glasses_full is None else glasses_full[y0:y1, x0:x1]
+    rh, rw = roi.shape[:2]
+    f = min(1.0, MAX_PROCESS_PX / max(rh, rw))
+    if f < 1.0:
+        proc = cv2.resize(roi, (int(rw * f), int(rh * f)), interpolation=cv2.INTER_AREA)
+        roi_pts = roi_pts * f
+        if roi_gl is not None:
+            roi_gl = cv2.resize(roi_gl, (proc.shape[1], proc.shape[0]), interpolation=cv2.INTER_NEAREST)
+    else:
+        proc = roi
 
-        logger.exception(
-            "Cheek simulation pipeline failed: %s",
-            exc,
-        )
+    res = run_cheeks_simulation(proc, roi_pts, cfg, roi_gl)
+    warnings = res.warnings + warnings
 
-        return CheeksSimulationResult(
-            image=None,
-            success=False,
-            message=str(exc),
-        )
+    out_roi, mask_roi = res.image, res.mask
+    if f < 1.0:
+        a = cv2.resize(mask_roi, (rw, rh), interpolation=cv2.INTER_LINEAR).astype(np.float32)[..., None] / 255.0
+        up = cv2.resize(out_roi, (rw, rh), interpolation=cv2.INTER_CUBIC).astype(np.float32)
+        out_roi = np.clip(up * a + roi.astype(np.float32) * (1 - a), 0, 255).astype(np.uint8)
+        mask_roi = (a[..., 0] * 255).astype(np.uint8)
+
+    final = image.copy()
+    final[y0:y1, x0:x1] = out_roi
+    full_mask = np.zeros(image.shape[:2], np.uint8)
+    full_mask[y0:y1, x0:x1] = mask_roi
+
+    if show_outline and res.total_volume_ml > 1e-4:
+        final = _draw_modified_outline(final, full_mask)
+
+    return CheeksSimulationResult(final, full_mask, res.peak_shift_px, res.total_volume_ml, warnings, res.debug)
+
+
+def run_cheeks_pipeline(image: np.ndarray, **kwargs) -> np.ndarray:
+    """Thin wrapper returning only the BGR image (same style as ``run_lips_pipeline``)."""
+    return run_cheeks_pipeline_detailed(image, **kwargs).image

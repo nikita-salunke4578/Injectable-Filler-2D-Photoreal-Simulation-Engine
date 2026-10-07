@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from enum import Enum
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -54,6 +54,7 @@ class CheekParameters(BaseModel):
     left_cheek_multiplier: float = Field(default=1.0, ge=0.0, le=2.0, description="Multiplier for left cheek volume")
     right_cheek_multiplier: float = Field(default=1.0, ge=0.0, le=2.0, description="Multiplier for right cheek volume")
     skin_elasticity: float = Field(default=1.0, ge=0.8, le=1.2, description="Skin elasticity spread factor")
+    side: Literal["left", "right", "bilateral"] = Field(default="bilateral", description="Treated cheek (patient's left/right)")
 
 
 class CheekSimulationRequest(BaseModel):
@@ -95,6 +96,7 @@ class SimulationResponse(BaseModel):
     request_payload: list[ZoneSimulationRequest]
     estimated_cost_usd: tuple[float, float]
     total_volume_ml: float
+    warnings: list[str] = Field(default_factory=list, description="Non-fatal notes (auto-limited volume, glasses, head pose)")
     disclaimer: str = (
         "This is a simulated preview for planning and educational purposes only. "
         "Actual results vary by anatomy, product and injector technique."

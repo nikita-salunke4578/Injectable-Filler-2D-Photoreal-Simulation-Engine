@@ -21,6 +21,7 @@ Usage:
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import uuid
 from datetime import datetime, timezone
@@ -35,9 +36,34 @@ from app.common.schemas import (
 from app.common.image_io import decode_image_base64, encode_image_base64
 from app.simulations.jaw.pipeline import JawSimulationConfig, run_jaw_simulation
 from app.simulations.lips.pipeline import run_lips_pipeline
-from app.simulations.cheeks.pipeline import run_cheeks_pipeline
+from app.simulations.cheeks.pipeline import run_cheeks_pipeline_detailed
 
 logger = logging.getLogger(__name__)
+
+
+def _clamp(value: Any, lo: float, hi: float, default: float) -> float:
+    try:
+        return float(min(max(float(value), lo), hi))
+    except (TypeError, ValueError):
+        return default
+
+
+def _cheek_kwargs(meta: dict[str, Any]) -> dict[str, Any]:
+    """Map the frontend ``meta`` dict (CheekParameters in types/simulation.ts)
+    to pipeline kwargs, clamping to the documented slider ranges."""
+    side = str(meta.get("side", "bilateral"))
+    if side not in ("left", "right", "bilateral"):
+        side = "bilateral"
+    return dict(
+        lateral_volume_ck1=_clamp(meta.get("lateral_volume_ck1"), 0.0, 2.5, 1.0),
+        medial_volume_ck2=_clamp(meta.get("medial_volume_ck2"), 0.0, 2.5, 0.5),
+        submalar_volume_ck3=_clamp(meta.get("submalar_volume_ck3"), 0.0, 2.0, 0.0),
+        asymmetry_mode=bool(meta.get("asymmetry_mode", False)),
+        left_cheek_multiplier=_clamp(meta.get("left_cheek_multiplier"), 0.0, 2.0, 1.0),
+        right_cheek_multiplier=_clamp(meta.get("right_cheek_multiplier"), 0.0, 2.0, 1.0),
+        skin_elasticity=_clamp(meta.get("skin_elasticity"), 0.8, 1.2, 1.0),
+        side=side,
+    )
 
 
 class SimulationService:
@@ -72,6 +98,7 @@ class SimulationService:
         
         # 2. Iterate Zones and Apply Deformation
         total_vol = 0.0
+        warnings: list[str] = []
         for z_req in request.zones:
             if z_req.zone == TreatmentZone.LIPS:
                 # Extract specific lip parameters
@@ -92,28 +119,15 @@ class SimulationService:
                 )
                 
             elif z_req.zone == TreatmentZone.CHEEKS:
-                # Extract specific cheek parameters
-                lat_vol = float(z_req.meta.get("lateral_volume_ck1", 1.0))
-                med_vol = float(z_req.meta.get("medial_volume_ck2", 0.5))
-                sub_vol = float(z_req.meta.get("submalar_volume_ck3", 0.0))
-                asym = bool(z_req.meta.get("asymmetry_mode", False))
-                l_mult = float(z_req.meta.get("left_cheek_multiplier", 1.0))
-                r_mult = float(z_req.meta.get("right_cheek_multiplier", 1.0))
-                elasticity = float(z_req.meta.get("skin_elasticity", 1.0))
-                side = str(z_req.meta.get("side", "bilateral"))
-
-                current_image = run_cheeks_pipeline(
-                    image=current_image,
-                    lateral_volume_ck1=lat_vol,
-                    medial_volume_ck2=med_vol,
-                    submalar_volume_ck3=sub_vol,
-                    asymmetry_mode=asym,
-                    left_cheek_multiplier=l_mult,
-                    right_cheek_multiplier=r_mult,
-                    skin_elasticity=elasticity,
+                kw = _cheek_kwargs(z_req.meta)
+                cheek_res = await asyncio.to_thread(
+                    run_cheeks_pipeline_detailed,
+                    current_image,
                     show_outline=request.show_outline,
-                    side=side,
+                    **kw,
                 )
+                current_image = cheek_res.image
+                warnings.extend(cheek_res.warnings)
             elif z_req.zone == TreatmentZone.JAW:
                 config = JawSimulationConfig(
                     volume_ml=z_req.volume,
@@ -139,7 +153,8 @@ class SimulationService:
             request_payload=request.zones,
             estimated_cost_usd=(total_vol * 600.0, total_vol * 800.0),
             total_volume_ml=total_vol,
-            disclaimer="Simulated outcome only."
+            disclaimer="Simulated outcome only.",
+            warnings=warnings,
         )
 
     async def run_cheek_simulation(
@@ -150,8 +165,9 @@ class SimulationService:
         image = decode_image_base64(request.image_base64)
         p = request.parameters
 
-        simulated_image = run_cheeks_pipeline(
-            image=image,
+        res = await asyncio.to_thread(
+            run_cheeks_pipeline_detailed,
+            image,
             lateral_volume_ck1=p.lateral_volume_ck1,
             medial_volume_ck2=p.medial_volume_ck2,
             submalar_volume_ck3=p.submalar_volume_ck3,
@@ -159,11 +175,12 @@ class SimulationService:
             left_cheek_multiplier=p.left_cheek_multiplier,
             right_cheek_multiplier=p.right_cheek_multiplier,
             skin_elasticity=p.skin_elasticity,
+            side=p.side,
             show_outline=request.show_outline,
         )
 
-        after_base64 = encode_image_base64(simulated_image)
-        total_vol = (p.lateral_volume_ck1 + p.medial_volume_ck2 + p.submalar_volume_ck3)
+        after_base64 = encode_image_base64(res.image)
+        total_vol = p.lateral_volume_ck1 + p.medial_volume_ck2 + p.submalar_volume_ck3
 
         return {
             "id": str(uuid.uuid4()),
@@ -174,5 +191,6 @@ class SimulationService:
             "parameters": p.model_dump(),
             "total_volume_ml": round(total_vol, 2),
             "estimated_cost_usd": [round(total_vol * 600.0, 2), round(total_vol * 800.0, 2)],
+            "warnings": res.warnings,
             "disclaimer": "Simulated outcome for planning purposes only.",
         }

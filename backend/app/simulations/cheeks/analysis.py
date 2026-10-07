@@ -1,206 +1,177 @@
 """
-Cheek and midface facial proportion analysis.
+Cheek / midface proportion analysis.
 
-Extracts anatomical midface metrics (bizygomatic width, malar projection,
-submalar gauntness, and midface symmetry) from MediaPipe landmarks
-to generate personalized clinical filler recommendations and auto-fill slider values.
+Measures the face from MediaPipe landmarks (in the face's own rolled frame, so
+head tilt does not matter) and turns the numbers into:
+
+  * display metrics               -> ``metrics``        (keys used by Consultation.tsx)
+  * a clinical-style summary      -> ``recommendation``
+  * auto-fill slider values       -> ``suggested_parameters``  (CheekParameters in types/simulation.ts)
+  * auto-selected quiz answers    -> ``suggested_answers``
+
+NOTE: thresholds are geometric heuristics, not clinically validated. Tune
+them against your own reviewed photo set (see the constants below).
+
+Left/right in ``suggested_parameters`` refer to the PATIENT's cheeks (same as
+the UI labels); that is the opposite of the image side for a normal photo.
 """
-
 from __future__ import annotations
+
 import numpy as np
-from app.common.face_detection import FaceDetector
+
+from app.simulations.cheeks.detector import detect_landmarks
 from app.simulations.cheeks.landmarks import extract_cheek_landmarks
 
+# ---- tunable thresholds ---------------------------------------------------
+SYMMETRY_FLAG_BELOW = 88.0       # % ; below -> suggest asymmetry mode
+MAX_YAW_RATIO_FOR_ASYM = 0.75    # min/max edge distance; below = head turned, ignore asymmetry
+HOLLOW_FLAG_ABOVE = 15.0         # submalar_concavity_score
+FLAT_MALAR_BELOW = 0.50          # malar_projection_ratio
+NARROW_ZYGOMA_BELOW = 1.20       # zygoma_to_jaw_ratio
+HOLLOW_SCORE_GAIN = 3.0          # 1% of bizygomatic width of inward bow == score 3.0
+PATIENT_SIDE_IS_MIRRORED = True  # keep in sync with pipeline.PATIENT_SIDE_IS_MIRRORED
 
-def _euclidean(p1: np.ndarray, p2: np.ndarray) -> float:
-    return float(np.linalg.norm(p1 - p2))
+
+def _inward_bow(p, edge: int, mids: list[int], jaw: int, toward_mid: np.ndarray) -> float:
+    """Distance (px) the lower-cheek contour bows INWARD from the zygoma->jaw chord (+ = hollow)."""
+    a, b = p[edge], p[jaw]
+    ch = b - a
+    n = np.array([-ch[1], ch[0]], np.float32) / max(float(np.linalg.norm(ch)), 1e-6)
+    if float(n @ toward_mid) < 0:
+        n = -n
+    return float(np.mean([(p[m] - a) @ n for m in mids]))
 
 
-def analyze_cheek_proportions(image: np.ndarray, face_detector: FaceDetector | None = None) -> dict:
-    """
-    Scans the face and computes mathematical midface and cheekbone proportions.
-    Returns rich metrics, clinical analysis text, and auto-suggested cheek parameters.
-    """
-    if face_detector is None:
-        face_detector = FaceDetector()
-
+def analyze_cheek_proportions(image: np.ndarray, face_detector=None) -> dict:
     try:
-        face_pts = face_detector.get_landmarks(image)
+        face_pts = detect_landmarks(image, face_detector)
     except ValueError:
         return {"error": "No face detected in the image."}
 
-    landmarks = extract_cheek_landmarks(face_pts)
+    p = face_pts.astype(np.float32)
+    lm = extract_cheek_landmarks(p)
+    u, v, o = lm.roll_u, lm.roll_v, p[6]
 
-    # 1. Bizygomatic Width (outermost zygomatic landmarks 234 and 454)
-    left_zygoma = face_pts[234]
-    right_zygoma = face_pts[454]
-    bizygomatic_width = _euclidean(left_zygoma, right_zygoma)
+    def T(i):    # signed distance along the eye line from the midline (+ = image right)
+        return float((p[i] - o) @ u)
 
-    # 2. Bigonial (Jaw) Width (landmarks 172 and 397)
-    left_jaw = face_pts[172]
-    right_jaw = face_pts[397]
-    bigonial_width = _euclidean(left_jaw, right_jaw)
-    zygoma_to_jaw_ratio = bizygomatic_width / max(bigonial_width, 1.0)
+    def S(i):    # signed distance "down" the face from the nose bridge
+        return float((p[i] - o) @ v)
 
-    # 3. Malar Apex Projection & Position
-    left_apex = landmarks.left_apex
-    right_apex = landmarks.right_apex
-    nose_bridge = landmarks.nose_bridge
+    # 1. widths ---------------------------------------------------------------
+    bizygomatic = max(abs(T(454) - T(234)), 1.0)
+    bigonial = max(abs(T(397) - T(172)), 1.0)
+    zyg_jaw = bizygomatic / bigonial
 
-    # Midface centerline x
-    center_x = float(nose_bridge[0])
+    # 2. symmetry (distance of paired contour points from the midline) --------
+    pairs = [(234, 454), (93, 323), (58, 288), (61, 291)]
+    diffs = []
+    for l, r in pairs:
+        dl, dr = abs(T(l)), abs(T(r))
+        diffs.append(abs(dl - dr) / max(dl, dr, 1.0))
+    symmetry = float(np.clip(100.0 * (1.0 - float(np.mean(diffs)) * 1.5), 0.0, 100.0))
+    dl_edge, dr_edge = abs(T(234)), abs(T(454))
+    yaw_ratio = min(dl_edge, dr_edge) / max(dl_edge, dr_edge, 1.0)
 
-    # Left and right lateral arch distances
-    left_lateral_dist = abs(left_zygoma[0] - center_x)
-    right_lateral_dist = abs(right_zygoma[0] - center_x)
+    # 3. submalar hollow (contour bows inward between zygoma and jaw) ---------
+    bow_l = _inward_bow(p, 234, [93, 132], 58, u)        # image-left cheek: midline is toward +u
+    bow_r = _inward_bow(p, 454, [323, 361], 288, -u)     # image-right cheek: midline is toward -u
+    concavity = max(0.0, 100.0 * ((bow_l + bow_r) / 2.0) / bizygomatic) * HOLLOW_SCORE_GAIN
 
-    # 4. Midface Symmetry Score (compare left vs right cheek projection and lateral width)
-    max_lat = max(left_lateral_dist, right_lateral_dist, 1.0)
-    lat_diff = abs(left_lateral_dist - right_lateral_dist) / max_lat
+    # 4. malar projection: how high the widest point (zygoma) sits between nose base and eye line
+    eye_s, nose_s = (S(33) + S(263)) / 2.0, S(2)
+    zyg_s = (S(234) + S(454)) / 2.0
+    malar_ratio = (nose_s - zyg_s) / max(nose_s - eye_s, 1.0)
 
-    left_apex_dist = abs(left_apex[0] - center_x)
-    right_apex_dist = abs(right_apex[0] - center_x)
-    max_apex = max(left_apex_dist, right_apex_dist, 1.0)
-    apex_diff = abs(left_apex_dist - right_apex_dist) / max_apex
+    # 5. apex elevation: mouth corner -> malar apex ---------------------------
+    angles = []
+    for apex, mouth in ((lm.left_apex, p[61]), (lm.right_apex, p[291])):
+        d = apex - mouth
+        angles.append(np.degrees(np.arctan2(-(d @ v), max(abs(float(d @ u)), 1.0))))
+    apex_angle = float(np.mean(angles))
 
-    symmetry_score = max(0.0, min(100.0, 100.0 * (1.0 - 0.5 * (lat_diff + apex_diff))))
+    # 6. suggestions ----------------------------------------------------------
+    ck1, ck2, ck3 = 1.0, 0.6, 0.0
+    concern = "midface-sagging"
+    asym, patient_l, patient_r = False, 1.0, 1.0
 
-    # 5. Submalar Concavity / Gauntness Score
-    # Distance from malar apex down to submalar hollow
-    left_submalar = np.mean(landmarks.left_ck3, axis=0)
-    right_submalar = np.mean(landmarks.right_ck3, axis=0)
+    if symmetry < SYMMETRY_FLAG_BELOW and yaw_ratio >= MAX_YAW_RATIO_FOR_ASYM:
+        asym, concern = True, "cheek-asymmetry"
+        narrower_img = "left" if dl_edge < dr_edge else "right"
+        narrower_patient = ("right" if narrower_img == "left" else "left") if PATIENT_SIDE_IS_MIRRORED else narrower_img
+        # correct ONLY the deficient (narrower) side; the reference side stays at 1.0.
+        # boost grows with the measured asymmetry (1 - symmetry), clamped to a clinically sane range.
+        boost = round(float(np.clip(1.0 + 2.5 * (1.0 - symmetry / 100.0), 1.15, 1.6)), 2)
+        patient_l, patient_r = (boost, 1.0) if narrower_patient == "left" else (1.0, boost)
 
-    # Concavity: how far inward submalar is relative to zygomatic arch
-    left_inward = abs(left_zygoma[0] - left_submalar[0])
-    right_inward = abs(right_zygoma[0] - right_submalar[0])
-    avg_inward = (left_inward + right_inward) / 2.0
-    concavity_ratio = avg_inward / max(bizygomatic_width, 1.0)
+    if concavity > HOLLOW_FLAG_ABOVE:
+        ck3 = round(float(min(1.4, 0.4 + (concavity - HOLLOW_FLAG_ABOVE) / 20.0)), 1)
+        if not asym:
+            concern = "submalar-hollow"
 
-    # 6. Malar Projection Ratio (Apex height relative to midface vertical height)
-    eye_line_y = (face_pts[33][1] + face_pts[263][1]) / 2.0
-    nose_base_y = float(face_pts[2][1])
-    midface_height = max(abs(nose_base_y - eye_line_y), 1.0)
+    if malar_ratio < FLAT_MALAR_BELOW:
+        ck2 = 1.2
+        if not asym and ck3 < 0.8:
+            concern = "flat-malar"
 
-    avg_apex_y = (left_apex[1] + right_apex[1]) / 2.0
-    malar_projection_ratio = (nose_base_y - avg_apex_y) / midface_height
+    if zyg_jaw < NARROW_ZYGOMA_BELOW:
+        ck1 = 1.5
 
-    # 7. Apex Elevation Angle (angle of line from mouth corner to cheek apex)
-    mouth_left = face_pts[61]
-    mouth_right = face_pts[291]
-    dx_l = abs(left_apex[0] - mouth_left[0])
-    dy_l = mouth_left[1] - left_apex[1]  # positive when apex is higher than mouth
-    angle_l = np.degrees(np.arctan2(dy_l, max(dx_l, 1.0)))
+    total = round(ck1 + ck2 + ck3, 1)
 
-    dx_r = abs(right_apex[0] - mouth_right[0])
-    dy_r = mouth_right[1] - right_apex[1]
-    angle_r = np.degrees(np.arctan2(dy_r, max(dx_r, 1.0)))
-    avg_angle = (angle_l + angle_r) / 2.0
-
-    # 8. Clinical Classification & Suggestion Logic
-    # High cheekbone ideal: zygoma-to-jaw ratio ~ 1.25-1.35, malar projection ratio ~ 0.55-0.65
-    suggested_ck1 = 1.0
-    suggested_ck2 = 0.6
-    suggested_ck3 = 0.0
-    primary_concern = "midface-sagging"
-    asymmetry_mode = False
-    left_mult = 1.0
-    right_mult = 1.0
-
-    if symmetry_score < 88.0:
-        asymmetry_mode = True
-        primary_concern = "cheek-asymmetry"
-        if left_lateral_dist < right_lateral_dist:
-            left_mult = 1.25
-            right_mult = 0.85
-        else:
-            left_mult = 0.85
-            right_mult = 1.25
-
-    if concavity_ratio > 0.08:
-        # Noticeable gauntness in submalar region
-        suggested_ck3 = round(min(1.4, concavity_ratio * 12.0), 1)
-        if not asymmetry_mode:
-            primary_concern = "submalar-hollow"
-
-    if malar_projection_ratio < 0.50:
-        # Flat malar apex
-        suggested_ck2 = 1.2
-        if not asymmetry_mode and suggested_ck3 < 0.8:
-            primary_concern = "flat-malar"
-
-    if zygoma_to_jaw_ratio < 1.20:
-        # Narrow zygoma, would benefit from lateral lift
-        suggested_ck1 = 1.5
-
-    total_rec_vol = round(suggested_ck1 + suggested_ck2 + suggested_ck3, 1)
-
-    # Clinical recommendation text
-    if primary_concern == "submalar-hollow":
-        recommendation_text = (
-            f"Detected moderate gauntness in the lower submalar hollow (inward concavity ratio {concavity_ratio:.2f}). "
-            f"We recommend {suggested_ck3} mL in the submalar zone (CK3) combined with {suggested_ck1} mL lateral arch (CK1) "
-            "to soften lower cheek hollows while preserving natural skeletal contour."
-        )
-    elif primary_concern == "flat-malar":
-        recommendation_text = (
-            "Detected mild flattening of the anterior malar prominence. "
-            f"We recommend focusing {suggested_ck2} mL on the malar apex (CK2) for forward light-reflection projection, "
-            f"supported by {suggested_ck1} mL on the outer zygoma (CK1) for structural midface lift."
-        )
-    elif primary_concern == "cheek-asymmetry":
-        recommendation_text = (
-            f"Detected midface volume asymmetry (symmetry score {symmetry_score:.0f}%). "
-            "We recommend Asymmetry Mode with differential left vs. right volume multipliers "
-            "to balance lateral projection and achieve bilateral facial harmony."
-        )
+    if concern == "submalar-hollow":
+        text = (f"Detected hollowing beneath the cheekbone (submalar score {concavity:.1f}). "
+                f"We recommend {ck3} mL in the submalar zone (CK3) with {ck1} mL on the lateral arch (CK1) "
+                "to soften the lower cheek while preserving skeletal contour.")
+    elif concern == "flat-malar":
+        text = ("Detected limited forward projection of the malar prominence. "
+                f"We recommend {ck2} mL on the malar apex (CK2) for projection and light reflection, "
+                f"supported by {ck1} mL on the lateral arch (CK1) for midface lift.")
+    elif concern == "cheek-asymmetry":
+        text = (f"Detected midface asymmetry (symmetry score {symmetry:.0f}%). "
+                "Asymmetry Mode is suggested: only the deficient cheek is augmented; the reference cheek is left unchanged.")
     else:
-        recommendation_text = (
-            f"Your bizygomatic-to-jaw ratio is 1:{zygoma_to_jaw_ratio:.2f}. "
-            "A balanced multi-vector enhancement (1.0 mL lateral lift + 0.5 mL malar projection) "
-            "will accentuate the high cheekbone apex and restore youthful midface dynamics."
-        )
+        text = (f"Bizygomatic-to-jaw ratio is 1:{zyg_jaw:.2f}. A balanced enhancement "
+                f"({ck1} mL lateral lift + {ck2} mL malar projection) will accentuate the cheekbone apex "
+                "and restore midface support.")
+    if yaw_ratio < MAX_YAW_RATIO_FOR_ASYM:
+        text += " Note: the head appears turned; a straight-on photo gives more reliable symmetry readings."
 
-    # Estimate age range & elasticity
-    skin_elasticity = 1.0
-    age_range = "30-45"
-    if concavity_ratio > 0.10:
-        age_range = "45-60"
-        skin_elasticity = 1.1
-    elif malar_projection_ratio > 0.60 and symmetry_score > 92.0:
-        age_range = "18-30"
-        skin_elasticity = 0.9
+    # skin_elasticity = the UI "Skin Elasticity Scale" (kernel spread): 0.9 tight/youthful .. 1.1 mature/lax
+    elasticity, age_range = 1.0, "30-45"
+    if concavity > 20.0:
+        elasticity, age_range = 1.1, "45-60"
+    elif malar_ratio > 0.60 and symmetry > 92.0 and concavity < 5.0:
+        elasticity, age_range = 0.9, "18-30"
 
     return {
         "zone": "cheeks",
         "metrics": {
-            "bizygomatic_width_px": float(round(bizygomatic_width, 1)),
-            "malar_projection_ratio": float(round(malar_projection_ratio, 2)),
-            "submalar_concavity_score": float(round(concavity_ratio * 100.0, 1)),
-            "midface_symmetry_score": float(round(symmetry_score, 1)),
-            "apex_elevation_angle": float(round(avg_angle, 1)),
-            "zygoma_to_jaw_ratio": float(round(zygoma_to_jaw_ratio, 2)),
+            "bizygomatic_width_px": float(round(bizygomatic, 1)),
+            "malar_projection_ratio": float(round(malar_ratio, 2)),
+            "submalar_concavity_score": float(round(concavity, 1)),
+            "midface_symmetry_score": float(round(symmetry, 1)),
+            "apex_elevation_angle": float(round(apex_angle, 1)),
+            "zygoma_to_jaw_ratio": float(round(zyg_jaw, 2)),
         },
-        "recommendation": {
-            "text": recommendation_text,
-            "suggested_volume_ml": total_rec_vol,
-        },
+        "recommendation": {"text": text, "suggested_volume_ml": total},
         "suggested_parameters": {
-            "lateral_volume_ck1": suggested_ck1,
-            "medial_volume_ck2": suggested_ck2,
-            "submalar_volume_ck3": suggested_ck3,
-            "asymmetry_mode": asymmetry_mode,
-            "left_cheek_multiplier": left_mult,
-            "right_cheek_multiplier": right_mult,
-            "skin_elasticity": skin_elasticity,
-            "volumeMl": total_rec_vol,
+            "lateral_volume_ck1": ck1,
+            "medial_volume_ck2": ck2,
+            "submalar_volume_ck3": ck3,
+            "asymmetry_mode": asym,
+            "left_cheek_multiplier": patient_l,
+            "right_cheek_multiplier": patient_r,
+            "skin_elasticity": elasticity,
+            "volumeMl": total,
         },
         "suggested_answers": {
             "gender": "female",
             "ageRange": age_range,
-            "primaryConcern": primary_concern,
+            "primaryConcern": concern,
             "experience": "first-time",
-            "desiredOutcome": "contour" if suggested_ck1 >= 1.5 else "natural",
-            "skinElasticity": "lax" if skin_elasticity > 1.05 else ("tight" if skin_elasticity < 0.95 else "normal"),
-            "symmetryConcern": "significant" if symmetry_score < 80 else ("mild" if symmetry_score < 90 else "none"),
+            "desiredOutcome": "contour" if ck1 >= 1.5 else "natural",
+            "skinElasticity": "lax" if elasticity > 1.05 else ("tight" if elasticity < 0.95 else "normal"),
+            "symmetryConcern": "significant" if symmetry < 80 else ("mild" if symmetry < 90 else "none"),
         },
     }
