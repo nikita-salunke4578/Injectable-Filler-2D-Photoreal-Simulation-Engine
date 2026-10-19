@@ -50,6 +50,11 @@ Thumbs.db
 *.bmp
 *.tif
 *.tiff
+
+# Downloaded face models and labels
+backend/app/common/face_parsing_bisenet.onnx
+backend/app/common/face_landmarker.task
+backend/app/common/face_parsing_labels.txt
 backend/*.jpg
 backend/*.jpeg
 backend/*.png

@@ -19,16 +19,10 @@ def download_face_landmarker():
     )
 
 
-def download_selfie_segmenter():
-    download_model(
-        "https://storage.googleapis.com/mediapipe-models/image_segmenter/selfie_segmenter/float16/latest/selfie_segmenter.tflite",
-        "app/common/selfie_segmenter.tflite",
-    )
-
 
 def download_face_parsing_model():
     download_model(
-        "https://github.com/opencv/opencv_zoo/raw/main/models/face_parsing_bisenet/face_parsing_bisenet.onnx",
+        "https://huggingface.co/maze/faceX/resolve/c81a5dd38da1219d09b14eef7d87193c9efc580c/face_parser.onnx",
         "app/common/face_parsing_bisenet.onnx",
     )
 
@@ -66,6 +60,5 @@ cloth
 
 if __name__ == "__main__":
     download_face_landmarker()
-    download_selfie_segmenter()
     download_face_parsing_model()
     download_face_parsing_labels()
