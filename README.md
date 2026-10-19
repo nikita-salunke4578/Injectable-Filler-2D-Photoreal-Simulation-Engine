@@ -1309,6 +1309,13 @@ Install backend dependencies:
 ```powershell
 pip install -r requirements.txt
 ```
+Download the required machine-learning models:
+
+```powershell
+python download_model.py
+```
+
+This downloads the required model files into the appropriate folder. The model files are downloaded locally and do not need to be committed to GitHub.
 
 Start FastAPI:
 
